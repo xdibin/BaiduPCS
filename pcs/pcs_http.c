@@ -97,6 +97,7 @@ static inline void pcs_http_prepare(struct pcs_http *http, enum HttpMethod metho
 	pcs_http_reset_response(http);
 	curl_easy_setopt(http->curl, CURLOPT_USERAGENT, http->usage ? http->usage : USAGE);
 	curl_easy_setopt(http->curl, CURLOPT_URL, url);
+	curl_easy_setopt(http->curl, CURLOPT_REFERER, "https://pan.baidu.com/");
 	switch(method)
 	{
 	case HTTP_METHOD_GET:
@@ -467,6 +468,9 @@ PCS_API PcsHttp pcs_http_create(const char *cookie_file)
 	else {
 		curl_easy_setopt(http->curl, CURLOPT_COOKIEFILE, "");
 	}
+#if defined(DEBUG) || defined(_DEBUG)
+	curl_easy_setopt(http->curl, CURLOPT_VERBOSE, 1L);
+#endif
 	return http;
 }
 
@@ -1051,3 +1055,4 @@ PCS_API double pcs_http_speed_download(PcsHttp handle)
 	else
 		return 0.0;
 }
+

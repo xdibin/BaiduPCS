@@ -72,4 +72,8 @@ PCS_API const char *pcs_time2str(time_t time);
 
 PCS_API char *pcs_js_timestr();
 
+PCS_API char *pcs_utils_gid();
+
+PCS_API char *pcs_jsoncallback_random();
+
 #endif

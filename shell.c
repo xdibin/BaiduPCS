@@ -2047,6 +2047,7 @@ static Pcs *create_pcs(ShellContext *context)
 	pcs_setopt(pcs, PCS_OPTION_CAPTCHA_FUNCTION_DATA, (void *)context);
     pcs_setopt(pcs, PCS_OPTION_INPUT_FUNCTION, (void *)&input_str);
     pcs_setopt(pcs, PCS_OPTION_INPUT_FUNCTION_DATA, (void *)context);
+	pcs_setopt(pcs, PCS_OPTION_GID, NULL);
 	pcs_setopts(pcs,
 		PCS_OPTION_PROGRESS_FUNCTION, (void *)&upload_progress,
 		PCS_OPTION_PROGRESS, (void *)((long)PcsFalse),

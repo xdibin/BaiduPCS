@@ -68,7 +68,6 @@ typedef enum PcsHttpOption {
 	/*设置连接前的等待时间，值为long类型*/
 	PCS_HTTP_OPTION_CONNECTTIMEOUT,
 
-
 } PcsHttpOption;
 
 /*

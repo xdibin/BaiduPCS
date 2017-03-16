@@ -400,8 +400,70 @@ PCS_API char *pcs_js_timestr()
 {
 	static char s[32];
 
-	snprintf(s, sizeof(s), "%d", (int)time(NULL) * 1000);
+	uint64_t ts = time(NULL) * 1000;
+
+	snprintf(s, sizeof(s), "%llu", ts);
 
 	return s;
 }
+
+/**
+ * GID like "2E985BB-72C3-4687-9BBC-87B92F8A1615", strlen=35
+ * the [13] must be '4'
+ */
+PCS_API char *pcs_utils_gid()
+{
+	char *gid = NULL;
+	int i;
+	int j;
+	const int len = 35;
+
+	const char *hex = "0123456789ABCDEF";
+
+	gid = (char *)pcs_malloc(len + 1);
+	if (!gid) {
+		printf("malloc failed\n");
+		return NULL;
+	}
+
+	memset(gid, 0, len + 1);
+	strncpy(gid, "xxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx", len + 1);
+
+	/**
+	 * 将x替换成 0 - F
+	 * 将y替换成 
+	 */
+	for (i = 0; i < len; i++) {
+		j = (random() & 0xF);
+		if (gid[i] == 'x') {
+			gid[i] = hex[j];
+		} else if (gid[i] == 'y') {
+			j = (3 & j | 8);
+			gid[i] = hex[j];
+		}
+	}
+
+	printf("gid is %s\n", gid);
+
+	return gid;
+}
+
+PCS_API char *pcs_jsoncallback_random()
+{
+	int i;
+	const char *_36 = "0123456789acbdefghijklmnopqrstuvwxyz";
+	static char buf[20];
+	
+	memset(buf, 0, sizeof(buf));
+
+	strcpy(buf, "bd__cbs__");
+
+	for (i = 9; i < 15; i++) {
+		buf[i] = _36[(random()) % 36];
+	}
+	buf[15] = '\0';
+
+	return buf;
+}
+
 

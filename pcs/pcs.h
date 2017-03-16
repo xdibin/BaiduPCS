@@ -55,7 +55,8 @@ typedef enum PcsOption {
 	PCS_OPTION_TIMEOUT,
 	/*设置连接前的等待时间，值为long类型*/
 	PCS_OPTION_CONNECTTIMEOUT,
-
+	/* 设置PCS GID */
+	PCS_OPTION_GID,
 
 } PcsOption;
 

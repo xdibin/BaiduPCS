@@ -10,6 +10,9 @@
 # include <openssl/md5.h>
 #endif
 
+#include <openssl/rsa.h>
+#include <openssl/evp.h>
+
 #include "pcs_defs.h"
 #include "pcs_mem.h"
 #include "pcs_utils.h"
@@ -73,6 +76,8 @@ struct pcs {
 	char		*errmsg;
 	char		*public_key;
 	char		*key;
+	char		*gid;
+	char		*password_encryted;
 
 	PcsGetCaptchaFunction		captcha_func;
 	void						*captcha_data;
@@ -1084,96 +1089,96 @@ static PcsFileInfo *pcs_upload_slice_form(Pcs handle, PcsHttpForm form, curl_off
 }
 
 /*移除字符串中的换行符*/
-//static char * remove_enter(char *str)
-//{
-//	char *p1, *p2;
-//	p1 = p2 = str;
-//	for (p1 = p2 = str; *p1; p1++) {
-//		if (*p1 != '\n') {
-//			*p2++ = *p1;
-//		}
-//	}
-//	*p2 = '\0';
-//	return str;
-//}
+static char * remove_enter(char *str)
+{
+	char *p1, *p2;
+	p1 = p2 = str;
+	for (p1 = p2 = str; *p1; p1++) {
+		if (*p1 != '\n') {
+			*p2++ = *p1;
+		}
+	}
+	*p2 = '\0';
+	return str;
+}
 
 /**
 * 登录时，转换字节串为其base64编码
 * Use EVP to Base64 encode the input byte array to readable text
 */
-//static char* base64(const char *inputBuffer, int inputLen)
-//{
-//	EVP_ENCODE_CTX  ctx;
-//	int base64Len = (((inputLen + 2) / 3) * 4) + 1; // Base64 text length  
-//	int pemLen = base64Len + base64Len / 64; // PEM adds a newline every 64 bytes  
-//	char* base64 = (char *)pcs_malloc(pemLen + 1);
-//	int result;
-//	EVP_EncodeInit(&ctx);
-//	EVP_EncodeUpdate(&ctx, (unsigned char *)base64, &result, (unsigned char *)inputBuffer, inputLen);
-//	EVP_EncodeFinal(&ctx, (unsigned char *)&base64[result], &result);
-//	return remove_enter(base64);
-//}
+static char* base64(const char *inputBuffer, int inputLen)
+{
+	EVP_ENCODE_CTX  ctx;
+	int base64Len = (((inputLen + 2) / 3) * 4) + 1; // Base64 text length  
+	int pemLen = base64Len + base64Len / 64; // PEM adds a newline every 64 bytes  
+	char* base64 = (char *)pcs_malloc(pemLen + 1);
+	int result;
+	EVP_EncodeInit(&ctx);
+	EVP_EncodeUpdate(&ctx, (unsigned char *)base64, &result, (unsigned char *)inputBuffer, inputLen);
+	EVP_EncodeFinal(&ctx, (unsigned char *)&base64[result], &result);
+	return remove_enter(base64);
+}
 
 /*登录时编码密码密文中的符号*/
-//static char * escape_symbol(const char *buf)
-//{
-//	static char tb[] = "0123456789ABCDEF";
-//	const char *p = buf;
-//	char *tmp, *np;
-//	int newLen = 0;
-//#define IS_SYMBOL(p) (*p == '#' || *p == '%' || *p == '&' || *p == '+' || *p == '=' || *p == '/' || *p == '\\' || *p == ' ' || *p == '\f' || *p == '\r' || *p == '\n' || *p == '\t')
-//	while (*p) {
-//		if (IS_SYMBOL(p))
-//			newLen += 3;
-//		else
-//			newLen++;
-//		p++;
-//	}
-//	p = buf;
-//	tmp = (char *)pcs_malloc(newLen + 1);
-//	np = tmp;
-//	while (*p) {
-//		if (IS_SYMBOL(p)) {
-//			np[0] = '%';
-//			np[1] = tb[(((int)(*p)) >> 4) & 0xF];
-//			np[2] = tb[(((int)(*p))) & 0xF];
-//			np += 3;
-//		}
-//		else {
-//			*np = *p;
-//			np++;
-//		}
-//		p++;
-//	}
-//	*np = '\0';
-//	return tmp;
-//}
+static char * escape_symbol(const char *buf)
+{
+	static char tb[] = "0123456789ABCDEF";
+	const char *p = buf;
+	char *tmp, *np;
+	int newLen = 0;
+#define IS_SYMBOL(p) (*p == '#' || *p == '%' || *p == '&' || *p == '+' || *p == '=' || *p == '/' || *p == '\\' || *p == ' ' || *p == '\f' || *p == '\r' || *p == '\n' || *p == '\t')
+	while (*p) {
+		if (IS_SYMBOL(p))
+			newLen += 3;
+		else
+			newLen++;
+		p++;
+	}
+	p = buf;
+	tmp = (char *)pcs_malloc(newLen + 1);
+	np = tmp;
+	while (*p) {
+		if (IS_SYMBOL(p)) {
+			np[0] = '%';
+			np[1] = tb[(((int)(*p)) >> 4) & 0xF];
+			np[2] = tb[(((int)(*p))) & 0xF];
+			np += 3;
+		}
+		else {
+			*np = *p;
+			np++;
+		}
+		p++;
+	}
+	*np = '\0';
+	return tmp;
+}
 
 /*登录时加密用户密码*/
-//static char *rsa_encrypt(const char *str, const char *pub_key){
-//	char *p_en, *b64;
-//	int rsa_len;
-//	BIO *bufio;
-//	RSA *rsa = NULL;
-//
-//	bufio = BIO_new_mem_buf((void *)(char *)pub_key, -1);
-//	PEM_read_bio_RSA_PUBKEY(bufio, &rsa, NULL, NULL);
-//	if (rsa == NULL){
-//		ERR_print_errors_fp(stdout);
-//		return NULL;
-//	}
-//	rsa_len = RSA_size(rsa);
-//	p_en = (unsigned char *)pcs_malloc(rsa_len + 1);
-//	memset(p_en, 0, rsa_len + 1);
-//	if (RSA_public_encrypt(rsa_len, (unsigned char *)str, (unsigned char*)p_en, rsa, RSA_NO_PADDING)<0){
-//		return NULL;
-//	}
-//	RSA_free(rsa);
-//
-//	b64 = base64(p_en, rsa_len);
-//	pcs_free(p_en);
-//	return b64;
-//}
+static char *rsa_encrypt(const char *str, const char *pub_key){
+	char *p_en, *b64;
+	int rsa_len;
+	BIO *bufio;
+	RSA *rsa = NULL;
+
+	bufio = BIO_new_mem_buf((void *)(char *)pub_key, -1);
+	PEM_read_bio_RSA_PUBKEY(bufio, &rsa, NULL, NULL);
+	if (rsa == NULL){
+		ERR_print_errors_fp(stdout);
+		return NULL;
+	}
+	rsa_len = RSA_size(rsa);
+	p_en = (unsigned char *)pcs_malloc(rsa_len + 1);
+	memset(p_en, 0, rsa_len + 1);
+	if (RSA_public_encrypt(rsa_len, (unsigned char *)str, (unsigned char*)p_en, rsa, RSA_NO_PADDING)<0){
+		return NULL;
+	}
+	RSA_free(rsa);
+
+	b64 = base64(p_en, rsa_len);
+	pcs_free(p_en);
+	return b64;
+}
 
 PCS_API const char *pcs_version()
 {
@@ -1223,6 +1228,11 @@ PCS_API void pcs_destroy(Pcs handle)
 		pcs_free(pcs->key);
 	if (pcs->buffer)
 		pcs_free(pcs->buffer);
+	if (pcs->gid)
+		pcs_free(pcs->gid);
+	if (pcs->password_encryted) {
+		pcs_free(pcs->password_encryted);
+	}
 	pcs_free(pcs);
 }
 
@@ -1360,6 +1370,9 @@ PCS_API PcsRes pcs_setopt(Pcs handle, PcsOption opt, void *value)
 	case PCS_OPTION_CONNECTTIMEOUT:
 		pcs_http_setopt(pcs->http, PCS_HTTP_OPTION_CONNECTTIMEOUT, value);
 		break;
+	case PCS_OPTION_GID:
+		pcs->gid = pcs_utils_gid();
+		break;
 	}
 	return res;
 }
@@ -1480,10 +1493,12 @@ static PcsRes pcs_prelogin(__in Pcs handle,
 	}
 
 	url = pcs_utils_sprintf(URL_PASSPORT_API "getapi" 
-		"&tpl=netdisk" "&apiver=v3" "&tt=%s"
-		"&class=login" "&logintype=basicLogin"
-		"&callback=bd__cbs__pwxtn7",
-		pcs_js_timestr());
+		"&tpl=netdisk" "&subpro=netdisk_web" "&apiver=v3" "&tt=%s"
+		"&class=login" "&logintype=basicLogin" "&gid=%s"
+		"&callback=%s",
+		pcs_js_timestr(),
+		pcs->gid,
+		pcs_jsoncallback_random());
 	html = pcs_http_get(pcs->http, url, PcsTrue);
 	pcs_free(url);
 	if (!html) {
@@ -1494,7 +1509,7 @@ static PcsRes pcs_prelogin(__in Pcs handle,
 			pcs_set_errmsg(handle, "Can't get response from the remote server.");
 		return PCS_NETWORK_ERROR;
 	}
-
+	printf("%s %d %s : HTTP response is [\n%s\n]\n", __FILE__, __LINE__, __FUNCTION__, html);
 	json = cJSON_Parse(extract_json_from_callback(html));
 	if (!json) {
 		pcs_set_errmsg(handle, "Can't parse the response as object. Response: %s", html);
@@ -1535,12 +1550,13 @@ static PcsRes pcs_prelogin(__in Pcs handle,
 		p++;
 	}
 
-	url = pcs_utils_sprintf(URL_PASSPORT_API "logincheck" 
-		"&token=%s" "&tpl=netdisk" 
-		"&apiver=v3" "&tt=%s" 
-		"&username=%s" "&isphone=false"
-		"&callback=bd__cbs__q4ztud",
-		*token, pcs_js_timestr(), pcs->username);
+	/* get RSA keys */
+	url = pcs_utils_sprintf(URL_GET_PUBLIC_KEY 
+		"&token=%s" "&tpl=netdisk" "&subpro=netdisk_web"
+		"&apiver=v3" "&tt=%s" "&gid=%s"
+		"&callback=%s",
+		*token, pcs_js_timestr(), pcs->gid,
+		pcs_jsoncallback_random());
 	html = pcs_http_get(pcs->http, url, PcsTrue);
 	pcs_free(url);
 	if (!html) {
@@ -1551,6 +1567,52 @@ static PcsRes pcs_prelogin(__in Pcs handle,
 			pcs_set_errmsg(handle, "Can't get response from the remote server.");
 		return PCS_NETWORK_ERROR;
 	}
+	printf("%s %d %s : HTTP response is [\n%s\n]\n", __FILE__, __LINE__, __FUNCTION__, html);
+	json = cJSON_Parse(extract_json_from_callback(html));
+	if (!json) {
+		pcs_set_errmsg(handle, "Can't parse the response as object. Response: %s", html);
+		return PCS_WRONG_RESPONSE;
+	}
+	item = cJSON_GetObjectItem(json, "pubkey");
+	if (!item) {
+		pcs_set_errmsg(handle, "Can't read res.pubkey. Response: %s", html);
+		cJSON_Delete(json);
+		return PCS_WRONG_RESPONSE;
+	}
+	pcs->public_key = pcs_utils_strdup(item->valuestring);
+	printf("pubkey = '%s'\n", pcs->public_key);
+	item = cJSON_GetObjectItem(json, "key");
+	if (!item) {
+		pcs_set_errmsg(handle, "Can't read res.key. Response: %s", html);
+		cJSON_Delete(json);
+		return PCS_WRONG_RESPONSE;
+	}	
+	pcs->key = pcs_utils_strdup(item->valuestring);
+	printf("key = '%s'\n", pcs->key);
+	cJSON_Delete(json);
+
+	/* encrypt the password */
+	pcs->password_encryted = rsa_encrypt(pcs->password, pcs->public_key);
+	printf("password encrypt base64 is '%s'\n", pcs->password_encryted);
+
+	url = pcs_utils_sprintf(URL_PASSPORT_API "logincheck" 
+		"&token=%s" "&tpl=netdisk" 
+		"&apiver=v3" "&tt=%s" 
+		"&username=%s" "&isphone=false"
+		"&callback=%s",
+		*token, pcs_js_timestr(), pcs->username,
+		pcs_jsoncallback_random());
+	html = pcs_http_get(pcs->http, url, PcsTrue);
+	pcs_free(url);
+	if (!html) {
+		errmsg = pcs_http_strerror(pcs->http);
+		if (errmsg)
+			pcs_set_serrmsg(handle, errmsg);
+		else
+			pcs_set_errmsg(handle, "Can't get response from the remote server.");
+		return PCS_NETWORK_ERROR;
+	}
+	printf("%s %d %s : HTTP response is [\n%s\n]\n", __FILE__, __LINE__, __FUNCTION__, html);
 	json = cJSON_Parse(extract_json_from_callback(html));
 	if (!json) {
 		pcs_set_errmsg(handle, "Can't parse the response as object. Response: %s", html);
@@ -1650,38 +1712,49 @@ static PcsRes pcs_dologin(__in Pcs handle,
 		}
 	}
 
+	char callback_str[48] = "parent.";
+	strcat(callback_str, pcs_jsoncallback_random());
+
 	post_data = pcs_http_build_post_data(pcs->http,
 		"staticpage", "http://pan.baidu.com/res/static/thirdparty/pass_v3_jump.html",
 		"charset", "utf-8",
 		"token", token,
 		"tpl", "netdisk",
-		"subpro", "",
+		"subpro", "netdisk_web",
 		"apiver", "v3",
 		"tt", pcs_js_timestr(),
 		"codestring", code_string,
 		"safeflg", "0",
-		"u", "http://pan.baidu.com/",
-		"isPhone", "",
-		"quick_user", "0",
+		"u", "http://pan.baidu.com/disk/home",
+		"isPhone", "false",
+		"gid", pcs->gid,
+		"quick_user", "0",		
 		"logintype", "basicLogin",
 		"logLoginType", "pc_loginBasic",
 		"idc", "",
 		"loginmerge", "true",
+		"foreignusername", "",
 		"username", pcs->username,
 		"password", pcs->password,
 		"verifycode", captch,
 		"mem_pass", "on",
 		"rsakey", "",
 		"crypttype", "",
-		"ppui_logintime", "2602",
-		"callback", "parent.bd__pcbs__msdlhs",
+		"ppui_logintime", "10517",
+		"countrycode", "",
+		"dv", "MDEwAAoAzgAKAUoADwAAAF00AA0CABvLy8FidCBhL2g6ezZpNmY1ZToOUQ59CGoHbhoJAgAi3dk-P4OBgYGBh8TEkNGf2IrLhtmG1oXVir7hvs242rfeqggCACbW09DRCwsLD0AUVRtcDk8CXQJSAVEOOmU6STxeM1oueQtqGmoPfQcCAATLy8vLEwIAGcve3t62wrbG_NP8jO2Drc-ux6PW-Jv0mbYWAgAi6p71xevS59_n0uvb7d3s1efU59_n1uLa49fv2u_X5tbu2RUCAAjLy8qQXB5VcQECAAbLw8PNWugFAgAEy8vLwQQCAAbJycvK_8kXAgAMycna2t3tlaWJ6oatEAIAAcsGAgAoy8vLy8vLy8vLy8yjo6OgNDQ0M7Ozs7ePj4-ICAgIDBwcHBubm5ufjwcCAATLy8vLDQIAG8vLzYWTx4bIj92c0Y7RgdKC3em26ZrvjeCJ_Q",
+		"callback", callback_str,
 		NULL);
 	if (!post_data) {
 		pcs_set_errmsg(handle, "Can't build the post data.");
 		return PCS_BUILD_POST_DATA;
 	}
+	printf("%s %d %s : POST data is \n[%s]\n", __FILE__, __LINE__, __FUNCTION__, post_data);
+	
 	html = pcs_http_post(pcs->http, URL_PASSPORT_API "login", post_data, PcsTrue);
 	pcs_free(post_data);
+
+	printf("%s %d %s : HTML response is \n[%s]\n", __FILE__, __LINE__, __FUNCTION__, html);
 	if (!html) {
 		errmsg = pcs_http_strerror(pcs->http);
 		if (errmsg)
@@ -2025,7 +2098,7 @@ PCS_API PcsRes pcs_login(Pcs handle)
 		pcs_free(code_string);
 		return res;
 	}
-
+	printf("%s %d %s : prelogin ok\n", __FILE__, __LINE__, __FUNCTION__);
 	retry_times = 0;
 
 try_login:
