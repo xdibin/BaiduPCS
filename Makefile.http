@@ -7,7 +7,7 @@ OS_NAME = $(shell uname -s | cut -c1-6)
 LC_OS_NAME = $(shell echo $(OS_NAME) | tr '[A-Z]' '[a-z]')
 
 PCS_OBJS     = bin/cJSON.o bin/pcs.o bin/pcs_fileinfo.o bin/pcs_http.o bin/pcs_mem.o bin/pcs_pan_api_resinfo.o bin/pcs_slist.o bin/pcs_utils.o bin/err_msg.o
-HTTP_OBJS    = bin/http.o bin/dispatch.o bin/utils_print.o bin/utils.o
+HTTP_OBJS    = bin/http.o bin/dispatch.o bin/utils_print.o bin/utils.o bin/xhttpd.o bin/download.o
 #CCFLAGS      = -DHAVE_ASPRINTF -DHAVE_ICONV
 ifeq ($(LC_OS_NAME), cygwin)
 CYGWIN_CCFLAGS = -largp
@@ -28,24 +28,28 @@ else
 CCFLAGS:=-g -D_FILE_OFFSET_BITS=64 -DDEBUG -D_DEBUG
 endif
 
-PCS_CCFLAGS = -fPIC $(CCFLAGS) $(CYGWIN_CCFLAGS) $(APPLE_CCFLAGS) -I./pcs -I/home/michael/install/include
+PCS_CCFLAGS = -fPIC $(CCFLAGS) $(CYGWIN_CCFLAGS) $(APPLE_CCFLAGS) -I./pcs
 
 all: bin/pcs
 
 bin/pcs : pre $(PCS_OBJS) $(HTTP_OBJS)
-	$(CC) -o $@ $(PCS_OBJS) $(HTTP_OBJS) $(CCFLAGS) $(CYGWIN_CCFLAGS) $(APPLE_CCFLAGS) -lm -lcurl -lssl -lcrypto -lpthread -lxhttpd -L/home/michael/install/lib
+	$(CC) -o $@ $(PCS_OBJS) $(HTTP_OBJS) $(CCFLAGS) $(CYGWIN_CCFLAGS) $(APPLE_CCFLAGS) -lm -lcurl -lssl -lcrypto -lpthread -lev
 
 
 #HTTP_CFLAGS = -Wunused-variable -Werror
 
 bin/http.o: http.c http.h dispatch.h
 	$(CC) -o $@ -c $(PCS_CCFLAGS) $< $(HTTP_CFLAGS)
-bin/dispatch.o: dispatch.c dispatch.h utils_print.h
+bin/dispatch.o: dispatch.c dispatch.h utils_print.h download.h xhttpd.h
 	$(CC) -o $@ -c $(PCS_CCFLAGS) $< $(HTTP_CFLAGS)
 bin/utils_print.o: utils_print.c utils_print.h
 	$(CC) -o $@ -c $(PCS_CCFLAGS) $< $(HTTP_CFLAGS)
 bin/utils.o: utils.c utils.h
 	$(CC) -o $@ -c $(PCS_CCFLAGS) $<
+bin/xhttpd.o: xhttpd.c xhttpd.h
+	$(CC) -o $@ -c $(PCS_CCFLAGS) $< $(HTTP_CFLAGS)
+bin/download.o: download.c download.h
+	$(CC) -o $@ -c $(PCS_CCFLAGS) $< $(HTTP_CFLAGS)
 
 bin/cJSON.o: pcs/cJSON.c pcs/cJSON.h
 	$(CC) -o $@ -c $(PCS_CCFLAGS) pcs/cJSON.c

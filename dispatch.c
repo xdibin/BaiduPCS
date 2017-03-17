@@ -8,9 +8,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "cJSON.h"
+
 #include "dispatch.h"
 #include "utils_print.h"
 #include "error_code.h"
+#include "download.h"
 
 #include "xhttpd.h"
 
@@ -503,106 +506,181 @@ static int callback_download(HttpContext *context)
 	char *rpath = NULL;
 	char *ldir = NULL;
 	char *lname = NULL;
-	char *offset = NULL;
-	char *length = NULL;
-	char *force = NULL;
+	char *lpath = NULL;
 
-	char lpath_real[4096];
-	char rpath_real[4096];
-	char lname_real[2048];
-	int lpath_real_len = 0;
-	int err;
-	int rc;
+	int err = 0;
+	int ret = ERRCODE_UNKNOWN;
 
-	int64_t i8_length = 0;
-	int64_t i8_offset = 0;
-	int i4_force = 0;
+	int64_t length = 0;
+	int64_t offset = 0;
+	int force = 0;
 
-	rpath = PARAM_GET(context, "rpath");
-	ldir = PARAM_GET(context, "ldir");
-	lname = PARAM_GET(context, "lname");
-	offset = PARAM_GET(context, "offset");
-	length = PARAM_GET(context, "length");
-	force = PARAM_GET(context, "force");
-
-	if (offset) {
-		i8_offset = atoll(offset);
-	}
-
-	if (length) {
-		i8_length = atoll(length);
-	}
-
-	if (force) {
-		i4_force = atoi(force);
-	}
-
-	if (!rpath || !*rpath || 
-		!ldir || !*ldir ||
-		i8_offset < 0 ||
-		i8_length < 0 ||
-		(i4_force != 0 && i4_force != 1)
-	) {
+	xhttpd_http_t *xhttp = (xhttpd_http_t *)(context->http);
+	if (!xhttp || xhttp->method != XHTTPD_METHOD_POST || !(xhttp->content)) {
+		printf("must post and json context\n");
 		return ERRCODE_ARG;
 	}
 
-	if (!lname || !*lname) {
-		memset(rpath_real, 0, sizeof(rpath_real));
-		xhttpd_url_decode(rpath, strlen(rpath), rpath_real, sizeof(rpath_real) - 1, 0);
-		char *rr = strrchr(rpath_real, '/');
-		
+	cJSON *root = NULL;
+	cJSON *array = NULL;
+	cJSON *list = NULL;
+	cJSON *item = NULL;
+	int array_size = 0;
+
+	root = cJSON_Parse(xhttp->content);
+	if (!root) {
+		printf("parse json failed, %s\n", xhttp->content);
+		return ERRCODE_ARG;
 	}
 
-	/* check local file */
+	array = cJSON_GetObjectItem(root, "list");
+	if (!array && array->type != cJSON_Array) {
+		cJSON_Delete(root);
+		return ERRCODE_ARG;
+	}
 
+	array_size = cJSON_GetArraySize(array);
 
-	memset(lpath_real, 0, sizeof(lpath_real));
-	lpath_real_len = xhttpd_url_decode(ldir, strlen(ldir), lpath_real, sizeof(lpath_real) - 1, 0);
+	if (array_size <= 0) {
+		cJSON_Delete(root);
+		return ERRCODE_ARG;
+	} else if (array_size > 1) {
+		printf("only support one task to download now\n");
+	}
+
+	list = array->child;
+
+	item = cJSON_GetObjectItem(list, "rpath");
+	if (item && item->type == cJSON_String && item->valuestring && !*(item->valuestring)) {
+		rpath = pcs_utils_strdup(item->valuestring);
+	}
+
+	item = cJSON_GetObjectItem(list, "ldir");
+	if (item && item->type == cJSON_String && item->valuestring && !*(item->valuestring)) {
+		ldir = pcs_utils_strdup(item->valuestring);
+	}
+
+	item = cJSON_GetObjectItem(list, "lname");
+	if (item && item->type == cJSON_String && item->valuestring && !*(item->valuestring)) {
+		lname = pcs_utils_strdup(item->valuestring);
+	}
+
+	item = cJSON_GetObjectItem(list, "offset");
+	if (item && item->type == cJSON_Number) {
+		offset = item->valueint;
+	}
+
+	item = cJSON_GetObjectItem(list, "length");
+	if (item && item->type == cJSON_Number) {
+		length = item->valueint;
+	}
+
+	item = cJSON_GetObjectItem(list, "force");
+	if (item && item->type == cJSON_Number) {
+		force = item->valueint;
+	}
+
+	cJSON_Delete(root);
+
+	/* check arguments */
+	if (!rpath || (rpath[0] != '/') || ( rpath[1] == '\0') ||
+		!ldir || (ldir[0] != '/') || (ldir[1] == '\0') ||
+		offset < 0 ||
+		length < 0 ||
+		(force != 0 && force != 1)
+	) {
+		ret = ERRCODE_ARG;
+		goto download_out;
+	}
+
+	if (!lname || !*lname) {
+		char *rr = strrchr(rpath, '/');
+		if (!rr) {
+			ret = ERRCODE_ARG;
+			goto download_out;
+		}
+		lname = pcs_utils_strdup(rr + 1);
+	}
+
+	int lpath_len = strlen(ldir) + strlen(lname) + 2;
 	
-	printf("local path is '%s'\n", lpath_real);
+	lpath = (char *)pcs_malloc(lpath_len);
+	if (!lpath) {
+		ret = ERRCODE_MEMORY;
+		goto download_out;
+	}
+
+	snprintf(lpath, lpath_len, "%s/%s", ldir, lname);
 
 	struct stat st;
-	if (stat(lpath_real, &st) == -1) {
+	if (stat(ldir, &st) == -1) {
 		err = errno;
 		if (err != ENOENT) {
-			printf("stat file failed, %s, %s\n", lpath_real, strerror(err));
-			return ERRCODE_LOCAL_FILE;
+			printf("stat ldir failed, %s, %s\n", ldir, strerror(err));
+			ret = ERRCODE_LOCAL_FILE;
+			goto download_out;
 		} else {
 			/* create the dir */
 			printf("dir not exist\n");
-			return ERRCODE_LOCAL_FILE;
+			ret = ERRCODE_LOCAL_FILE;
+			goto download_out;
 		}
 	} else {
 		if (!S_ISDIR(st.st_mode)) {
 			/* not a dir */
-			return ERRCODE_LOCAL_FILE;
+			ret = ERRCODE_LOCAL_FILE;
+			goto download_out;
 		}
 	}
 
-	if (lpath_real[lpath_real_len - 1] != '/') {
-		lpath_real[lpath_real_len] = '/';
-		lpath_real_len++;
-	}
-	assert(lpath_real_len >= sizeof(lpath_real));
+	pcs_free(ldir);
+	ldir = NULL;
 
-	xhttpd_url_decode(lname_real, strlen(lname_real), lpath_real + lpath_real_len, sizeof(lpath_real) - 1 - lpath_real_len, 0);
-
-	if (stat(lpath_real, &st) == 0) {
+	if (stat(lpath, &st) == 0) {
 		if (!S_ISREG(st.st_mode)) {
 			/* not a file */
-			return ERRCODE_LOCAL_FILE;
+			ret = ERRCODE_LOCAL_FILE;
+			goto download_out;
 		} else {
 			/* check force overwrite flag is set or not ? */
-			if (i4_force == 0) {
+			if (force == 0) {
 				printf("file exist not force overwrite is not set!\n");
-				return ERRCODE_LOCAL_FILE;
+				ret =  ERRCODE_LOCAL_FILE;
+				goto download_out;
+			} else {
+				/* remove the local file */
+				unlink(lpath);
+				if (access(lpath, F_OK) == 0) {
+					ret =  ERRCODE_LOCAL_FILE;
+					goto download_out;
+				}
 			}
 		}
 	}
 
+	/* check remote file */
+	PcsFileInfo *meta = pcs_meta(context->pcs, rpath);
+	if (!meta) {
+		ret = ERRCODE_REMOTE_FILE;
+		goto download_out;
+	}
 
+	if (meta->isdir) {
+		printf("not support of dir download\n");
+		ret = ERRCODE_REMOTE_FILE;
+		goto download_out;
+	}
 
+	ret = download_task_add(context, rpath, meta->md5, (uint64_t)(meta->size), lpath, lname);
 
+download_out:
+	if (rpath) pcs_free(rpath);
+	if (lpath) pcs_free(lpath);
+	if (lname) pcs_free(lname);
+	if (ldir) pcs_free(ldir);
+	if (meta) pcs_fileinfo_destroy(meta);
+
+	return ret;
 }
 
 static void http_response_error(HttpContext *context, int error_code)

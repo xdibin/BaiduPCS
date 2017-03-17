@@ -15,6 +15,7 @@ enum error_code {
     ERRCODE_NOT_LOGIN           = -6,   /**< 未登陆 */
     ERRCODE_LOCAL_FILE          = -7,   /**< 本地文件错误 */
     ERRCODE_REMOTE_FILE         = -8,   /**< 远端文件错误 */
+    ERRCODE_TASK_EXIST          = -9,   /**< 任务已存在 */
 
 };
 

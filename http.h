@@ -30,6 +30,15 @@
 #define LIST_PAGE_SIZE_DEFAULT	20	
 
 
+#ifndef HTTP_TIMEOUT
+#define HTTP_TIMEOUT	6
+#endif
+
+#ifndef HTTP_CONNECT_TIMEOUT
+#define HTTP_CONNECT_TIMEOUT	2
+#endif
+
+
 /**
  * @brief HTTP上下文定义
  *

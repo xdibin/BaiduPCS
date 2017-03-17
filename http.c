@@ -332,6 +332,8 @@ static Pcs *create_http_pcs(HttpContext *context)
 	Pcs *pcs = pcs_create(context->cookiefile);
 	if (!pcs) return NULL;
 	pcs_setopt(pcs, PCS_OPTION_GID, NULL);
+	pcs_setopt(pcs, PCS_OPTION_TIMEOUT, (void *)((long)HTTP_TIMEOUT));
+	pcs_setopt(pcs, PCS_OPTION_CONNECTTIMEOUT, (void *)((long)HTTP_CONNECT_TIMEOUT));
 	//pcs_setopt(pcs, PCS_OPTION_CAPTCHA_FUNCTION, (void *)&verifycode);
 	//pcs_setopt(pcs, PCS_OPTION_CAPTCHA_FUNCTION_DATA, (void *)context);
     //pcs_setopt(pcs, PCS_OPTION_INPUT_FUNCTION, (void *)&input_str);
