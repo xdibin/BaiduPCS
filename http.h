@@ -56,7 +56,7 @@ typedef struct HttpContext {
 
 	char		*user_agent;    /**< 浏览器代理 */
 
-	int			is_login;		/**< 是否已经登陆的标志位，可选值: 0 未登陆，1已登陆 */
+	void		*http;			/**< http协议相关的参数 */
 } HttpContext;
 
 #endif

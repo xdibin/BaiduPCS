@@ -12,8 +12,9 @@ enum error_code {
     ERRCODE_MEMORY              = -3,   /**< 内存不足 */
     ERRCODE_ARG                 = -4,   /**< 请求参数错误 */
     ERRCODE_PROTOCOL            = -5,   /**< 协议不支持 */
-    ERRCODE_NOT_LOGIN           = -6    /**< 未登陆 */
-    
+    ERRCODE_NOT_LOGIN           = -6,   /**< 未登陆 */
+    ERRCODE_LOCAL_FILE          = -7,   /**< 本地文件错误 */
+    ERRCODE_REMOTE_FILE         = -8,   /**< 远端文件错误 */
 
 };
 

@@ -1,10 +1,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
+#include <errno.h>
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "dispatch.h"
 #include "utils_print.h"
 #include "error_code.h"
+
+#include "xhttpd.h"
 
 /**
  * @brief HTTP分发回调函数原型
@@ -22,6 +30,11 @@ typedef struct DispatchTable {
     DispatchCallbackFunction callback;  /**< the callback function */
 } DispatchTable;
 
+
+
+#define PARAM_GET(c, k)	((char *)(xhttpd_parameter_get((xhttpd_http_t *)(c->http), (k))))
+
+static int http_response_by_xhttpd(HttpContext *http, const char *body, int bodylen);
 
 /**
  * @brief 将C语言的字符串编码成JSON字符串，对需要转义的控制字符进行转义替换
@@ -79,8 +92,15 @@ static int callback_login(HttpContext *context)
 	char *password = NULL;	
 
 	/* get username and password */
-	username = "xdibin";
-	password = "xiong1986";
+	username = PARAM_GET(context, "username");
+	password = PARAM_GET(context, "password");
+
+	if (!username || !*username || !password || !*password) {
+		return ERRCODE_ARG;
+	}
+
+	printf("username = '%s'\n", username);
+	printf("password = '%s'\n", password);
 
 	/* save the username and password */
 	pcs_setopt(context->pcs, PCS_OPTION_USERNAME, username);
@@ -100,10 +120,7 @@ static int callback_login(HttpContext *context)
 
 	printf("json response is '%s', len = %d\n", buf, len);
 
-	//TODO: Add http response here
-
-
-
+	http_response_by_xhttpd(context, buf, len);
 
 	return 0;
 }
@@ -115,10 +132,6 @@ static int callback_who(HttpContext *context)
 
 	memset(buf, 0, sizeof(buf));
 
-	if (!is_http_login(context)) {
-		return ERRCODE_NOT_LOGIN;
-	}
-
 	char name[256];
 	int name_len = sizeof(name);
 
@@ -128,9 +141,7 @@ static int callback_who(HttpContext *context)
 
 	printf("response is '%s', len = %d\n", buf, len);
 
-	//TODO: Add http response here
-
-
+	http_response_by_xhttpd(context, buf, len);
 
 	return 0;
 }
@@ -146,9 +157,6 @@ static int callback_logout(HttpContext *context)
 		return ERRCODE_UNKNOWN;
 	}
 
-	/* update the logout flag */
-	context->is_login = 0;
-
 	printf("Logout Success.\n");
 
 	char buf[512];
@@ -158,8 +166,7 @@ static int callback_logout(HttpContext *context)
 
 	printf("json response is '%s', len = %d\n", buf, len);
 
-	//TODO: Add http response here
-
+	http_response_by_xhttpd(context, buf, len);
 
 	return 0;	
 }
@@ -296,13 +303,25 @@ static int json_list_file_add(char **json, int *capacity, int *remain, PcsFileIn
  */
 static int callback_list(HttpContext *context)
 {
-    char *dir = NULL;
-    //char *page = NULL;
-    //char *num = NULL;
+    char *dir = PARAM_GET(context, "dir");
+    char *page = PARAM_GET(context, "page");
+    char *num = PARAM_GET(context, "num");
 
     /* set the default value */
     int i4_page = 1;
     int i4_num = context->list_page_size;
+
+	if (page) {
+		i4_page = atoi(page);
+	}
+
+	if (num) {
+		i4_num = atoi(num);
+	}
+
+	if (!dir || !*dir || i4_page <= 0 || i4_num <= 0) {
+		return ERRCODE_ARG;
+	}
 
 	PcsFileInfoList *list = NULL;
 
@@ -318,8 +337,6 @@ static int callback_list(HttpContext *context)
 	int json_remain = 0;
 	int rc = 0;
 	int total = 0;	
-
-    dir = "/data";
 
 	printf("try to list %s\n", dir);
 
@@ -370,7 +387,7 @@ static int callback_list(HttpContext *context)
 
 	printf("json response is '%s', len = %d\n", json, rc);
 
-	//TODO: Add http response here
+	http_response_by_xhttpd(context, json, rc);
 
 	json_list_file_free(&json);
 
@@ -398,9 +415,9 @@ static int callback_meta(HttpContext *context)
 	char filename[1024];
 	int filename_len =  sizeof(filename);
 
-	path = "/data";
+	path = PARAM_GET(context, "path");
 
-	if (strcmp(path, "/") == 0) {
+	if (!path || strcmp(path, "/") == 0) {
 		/* the root dir is not allowed to meta */
 		return ERRCODE_ARG;
 	}
@@ -439,8 +456,7 @@ static int callback_meta(HttpContext *context)
 
 	printf("response is '%s', len = %d\n", buf, len);
 
-	//TODO: Add http response here
-
+	http_response_by_xhttpd(context, buf, len);
 
 	return 0;
 }
@@ -472,20 +488,121 @@ static int callback_quota(HttpContext *context)
 
 	printf("response is '%s', len = %d\n", buf, len);
 
-	//TODO: Add http response here
-
+	http_response_by_xhttpd(context, buf, len);
 
 	return 0;
 }
 
 /**
- * @brief 
+ * @brief 下载单个文件
  *
  * @return 
  */
 static int callback_download(HttpContext *context)
 {
+	char *rpath = NULL;
+	char *ldir = NULL;
+	char *lname = NULL;
+	char *offset = NULL;
+	char *length = NULL;
+	char *force = NULL;
+
+	char lpath_real[4096];
+	char rpath_real[4096];
+	char lname_real[2048];
+	int lpath_real_len = 0;
+	int err;
+	int rc;
+
+	int64_t i8_length = 0;
+	int64_t i8_offset = 0;
+	int i4_force = 0;
+
+	rpath = PARAM_GET(context, "rpath");
+	ldir = PARAM_GET(context, "ldir");
+	lname = PARAM_GET(context, "lname");
+	offset = PARAM_GET(context, "offset");
+	length = PARAM_GET(context, "length");
+	force = PARAM_GET(context, "force");
+
+	if (offset) {
+		i8_offset = atoll(offset);
+	}
+
+	if (length) {
+		i8_length = atoll(length);
+	}
+
+	if (force) {
+		i4_force = atoi(force);
+	}
+
+	if (!rpath || !*rpath || 
+		!ldir || !*ldir ||
+		i8_offset < 0 ||
+		i8_length < 0 ||
+		(i4_force != 0 && i4_force != 1)
+	) {
+		return ERRCODE_ARG;
+	}
+
+	if (!lname || !*lname) {
+		memset(rpath_real, 0, sizeof(rpath_real));
+		xhttpd_url_decode(rpath, strlen(rpath), rpath_real, sizeof(rpath_real) - 1, 0);
+		char *rr = strrchr(rpath_real, '/');
+		
+	}
+
+	/* check local file */
+
+
+	memset(lpath_real, 0, sizeof(lpath_real));
+	lpath_real_len = xhttpd_url_decode(ldir, strlen(ldir), lpath_real, sizeof(lpath_real) - 1, 0);
 	
+	printf("local path is '%s'\n", lpath_real);
+
+	struct stat st;
+	if (stat(lpath_real, &st) == -1) {
+		err = errno;
+		if (err != ENOENT) {
+			printf("stat file failed, %s, %s\n", lpath_real, strerror(err));
+			return ERRCODE_LOCAL_FILE;
+		} else {
+			/* create the dir */
+			printf("dir not exist\n");
+			return ERRCODE_LOCAL_FILE;
+		}
+	} else {
+		if (!S_ISDIR(st.st_mode)) {
+			/* not a dir */
+			return ERRCODE_LOCAL_FILE;
+		}
+	}
+
+	if (lpath_real[lpath_real_len - 1] != '/') {
+		lpath_real[lpath_real_len] = '/';
+		lpath_real_len++;
+	}
+	assert(lpath_real_len >= sizeof(lpath_real));
+
+	xhttpd_url_decode(lname_real, strlen(lname_real), lpath_real + lpath_real_len, sizeof(lpath_real) - 1 - lpath_real_len, 0);
+
+	if (stat(lpath_real, &st) == 0) {
+		if (!S_ISREG(st.st_mode)) {
+			/* not a file */
+			return ERRCODE_LOCAL_FILE;
+		} else {
+			/* check force overwrite flag is set or not ? */
+			if (i4_force == 0) {
+				printf("file exist not force overwrite is not set!\n");
+				return ERRCODE_LOCAL_FILE;
+			}
+		}
+	}
+
+
+
+
 }
 
 static void http_response_error(HttpContext *context, int error_code)
@@ -499,8 +616,7 @@ static void http_response_error(HttpContext *context, int error_code)
 
 	printf("error code = %d, response = %s\n", error_code, buf);
 
-	//TODO: Add http response here
-
+	http_response_by_xhttpd(context, buf, len);
 
 	return;
 }
@@ -537,13 +653,36 @@ static int http_dispatch(HttpContext *context)
 {
 	int i;
 	int rc = 0;
+	int is_login = 0;
+	char *method = NULL;
 
-	char *method = "login";
+	xhttpd_http_t *http = (xhttpd_http_t *)(context->http);
+	assert(http != NULL);
+	printf("uri = '%s'\n", http->uri);
+
+	method = strrchr(http->uri, '/');
+	assert(method != NULL);
+
+	if (method[1] == '\0') {
+		http_response_error(context, ERRCODE_PROTOCOL);
+		return 0;
+	}
+
+	method++;
+
+	if (!is_http_login(context)) {
+		printf("not login the server\n");
+		is_login = 0;
+	}
+	else {
+		printf("have logined\n");
+		is_login = 1;
+	}
 
 	/* need check it every time */
-	if ((context->is_login == 0) && strcmp(method, "login") != 0) {
+	if ((is_login == 0) && strcmp(method, "login") != 0) {
 		/* not logined and not a login request */
-		printf("not logined and not a login request\n");
+		//printf("not logined and not a login request\n");
 		http_response_error(context, ERRCODE_NOT_LOGIN);
 
 		return 0;
@@ -569,6 +708,76 @@ static int http_dispatch(HttpContext *context)
 	return 0;
 }
 
+
+
+static void http_callback_by_xhttpd(xhttpd_http_t *http)
+{
+	HttpContext *context = (HttpContext *)(http->user_data);
+
+	assert(context != NULL);
+
+	context->http = http;
+
+	http_dispatch(context);
+
+	close(http->socket);
+
+	free(http->req.buf);
+
+	free(http);
+}
+
+static xhttpd_t *http_int_by_xhttpd(HttpContext *context)
+{
+	xhttpd_t *xhttpd = NULL;
+	int rc = 0;
+	struct sockaddr_in addr;
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(8888);
+	addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+	rc = xhttpd_init(&xhttpd, context, 
+		http_callback_by_xhttpd,
+		(struct sockaddr *)&addr, sizeof(addr));
+	if (rc != 0) {
+		printf("init xhttpd server failed\n");
+		return NULL;
+	}
+
+	return xhttpd;
+}
+
+
+static void http_exit_by_xhttpd(xhttpd_t *xhttp)
+{
+	xhttpd_exit(xhttp);
+}
+
+static int http_response_by_xhttpd(HttpContext *http, const char *body, int bodylen)
+{
+	char head[1024] = {0};
+	int ret;
+	xhttpd_http_t *xhttp = (xhttpd_http_t *)(http->http);
+	int socket = xhttp->socket;
+
+	ret = snprintf(head, sizeof(head),
+		"HTTP/1.1 200 OK\r\n"
+		"Content-Type: application/json;charset=utf-8\r\n"
+		"Content-Length: %d\r\n"
+		"Connection: close\r\n"
+		"\r\n",
+		bodylen
+	);
+
+	send(socket, head, ret, MSG_NOSIGNAL);
+
+	if (body || bodylen > 0) {
+		send(socket, body, bodylen, MSG_NOSIGNAL);
+	}
+}
+
 /**
  * @brief HTTP主循环
  *
@@ -578,17 +787,18 @@ static int http_dispatch(HttpContext *context)
  */
 int http_loop(HttpContext *context)
 {
-	if (!is_http_login(context)) {
-		/* try to login with username and password */
-		printf("not login the server\n");
-		context->is_login = 0;
-	}
-	else {
-		printf("have logined\n");
-		context->is_login = 1;
+	xhttpd_t *xhttpd = NULL;
+	xhttpd = http_int_by_xhttpd(context);
+
+	if (xhttpd == NULL) {
+		printf("init http server failed\n");
+		return -1;
 	}
 
-	http_dispatch(context);
+	xhttpd_loop(xhttpd);
+
+	http_exit_by_xhttpd(xhttpd);
+	xhttpd = NULL;
 
 	return 0;
 }

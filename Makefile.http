@@ -28,12 +28,12 @@ else
 CCFLAGS:=-g -D_FILE_OFFSET_BITS=64 -DDEBUG -D_DEBUG
 endif
 
-PCS_CCFLAGS = -fPIC $(CCFLAGS) $(CYGWIN_CCFLAGS) $(APPLE_CCFLAGS) -I./pcs
+PCS_CCFLAGS = -fPIC $(CCFLAGS) $(CYGWIN_CCFLAGS) $(APPLE_CCFLAGS) -I./pcs -I/home/michael/install/include
 
 all: bin/pcs
 
 bin/pcs : pre $(PCS_OBJS) $(HTTP_OBJS)
-	$(CC) -o $@ $(PCS_OBJS) $(HTTP_OBJS) $(CCFLAGS) $(CYGWIN_CCFLAGS) $(APPLE_CCFLAGS) -lm -lcurl -lssl -lcrypto -lpthread
+	$(CC) -o $@ $(PCS_OBJS) $(HTTP_OBJS) $(CCFLAGS) $(CYGWIN_CCFLAGS) $(APPLE_CCFLAGS) -lm -lcurl -lssl -lcrypto -lpthread -lxhttpd -L/home/michael/install/lib
 
 
 #HTTP_CFLAGS = -Wunused-variable -Werror
