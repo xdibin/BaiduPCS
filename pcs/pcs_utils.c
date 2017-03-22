@@ -443,8 +443,6 @@ PCS_API char *pcs_utils_gid()
 		}
 	}
 
-	printf("gid is %s\n", gid);
-
 	return gid;
 }
 

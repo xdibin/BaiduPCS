@@ -7,6 +7,7 @@
 #define SORT_DIRECTION_ASC	0 /*正序*/
 #define SORT_DIRECTION_DESC 1 /*倒序*/
 
+#define USAGE "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/55.0.2883.87 Safari/537.36"
 
 /**
  * @brief context文件的默认路径
@@ -38,6 +39,7 @@
 #define HTTP_CONNECT_TIMEOUT	2
 #endif
 
+#define URL_SIZE_MAX			8192
 
 /**
  * @brief HTTP上下文定义
@@ -48,6 +50,7 @@ typedef struct HttpContext {
 	char		*cookiefile; /**< Cookie文件路径 */
 	char		*captchafile; /**< 验证码图片路径 */
 	char		*workdir; /**< 当前工作目录 */
+	char		*gid;
 	Pcs			pcs; /**< PCS上下文 */
 
 	int			list_page_size; /*执行list命令时，每页大小*/
@@ -66,6 +69,9 @@ typedef struct HttpContext {
 	char		*user_agent;    /**< 浏览器代理 */
 
 	void		*http;			/**< http协议相关的参数 */
+
+	int			subtask_max;	/**< 每个HTTP文件下载任务的最大子任务个数 */
+	int			file_slice_size_min;	/**< 每个HTTP文件下载任务的最小文件分片尺寸 */
 } HttpContext;
 
 #endif

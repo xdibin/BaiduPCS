@@ -10,10 +10,9 @@
 
 #include "http.h"
 #include "dispatch.h"
+#include "pcs_log.h"
 
 
-
-#define USAGE "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/55.0.2883.87 Safari/537.36"
 
 
 
@@ -141,6 +140,7 @@ static int restore_http_context(HttpContext *context, const char *filename)
 		}
 #endif
 	}
+	pcs_log("context file is %s\n", context->contextfile);
 	filesize = read_file(context->contextfile, &filecontent);
 	if (filesize <= 0) {
 		fprintf(stderr, "Error: Can't read the context file (%s).\n", context->contextfile);
@@ -164,6 +164,7 @@ static int restore_http_context(HttpContext *context, const char *filename)
 			context->cookiefile = pcs_utils_strdup(item->valuestring);
 		}
 	}
+	pcs_log("cookie file is '%s'\n", context->cookiefile);
 
 	item = cJSON_GetObjectItem(root, "captchafile");
 	if (item && item->valuestring && item->valuestring[0]) {
@@ -308,6 +309,9 @@ static void init_http_context(HttpContext *context)
 	context->max_speed_per_thread = 0;
 	context->max_upload_speed_per_thread = 0;
 
+	context->subtask_max = 2;
+	context->file_slice_size_min = (16 << 20);
+
 	context->user_agent = pcs_utils_strdup(USAGE);
 }
 
@@ -331,7 +335,9 @@ static Pcs *create_http_pcs(HttpContext *context)
 {
 	Pcs *pcs = pcs_create(context->cookiefile);
 	if (!pcs) return NULL;
-	pcs_setopt(pcs, PCS_OPTION_GID, NULL);
+	char *gid = pcs_utils_gid();
+	pcs_setopt(pcs, PCS_OPTION_GID, gid);
+	context->gid = gid;
 	pcs_setopt(pcs, PCS_OPTION_TIMEOUT, (void *)((long)HTTP_TIMEOUT));
 	pcs_setopt(pcs, PCS_OPTION_CONNECTTIMEOUT, (void *)((long)HTTP_CONNECT_TIMEOUT));
 	//pcs_setopt(pcs, PCS_OPTION_CAPTCHA_FUNCTION, (void *)&verifycode);
@@ -373,41 +379,56 @@ int main(int argc, char *argv[])
 
 	setlocale(LC_ALL, "");
 
-	printf("main start\n");
+	pcs_log("main start\n");
 
 	srandom((unsigned int)(time(NULL)));
+
+	/* Must initialize libcurl before any threads are started */ 
+	curl_global_init(CURL_GLOBAL_ALL);
 
 	hook_cjson();
 	
 	init_http_context(&context);
 
-	printf("restore http context\n");
+	task_list_init();
+
+	pcs_log("restore http context\n");
 	rc = restore_http_context(&context, NULL);
 	
 	if (rc != 0) {
-		printf("restore http context failed, use default\n");
+		pcs_log("restore http context failed, use default\n");
 		free_http_context(&context);
 		init_http_context(&context);
 	}
 
-	printf("create pcs\n");
+	pcs_log("create pcs\n");
 	context.pcs = create_http_pcs(&context);
 	if (!context.pcs) {
 		rc = -1;
-		printf("Can't create pcs context.\n");
+		pcs_log("Can't create pcs context.\n");
 		goto exit_main;
 	}
 	
-	printf("waiting http request ...\n");
+	pcs_log("waiting http request ...\n");
 
 	http_loop(&context);
 
+	pcs_log("pcs exiting\n");	
+
 	destroy_http_pcs(context.pcs);
 	save_http_context(&context);
+
 exit_main:
+	task_list_exit();
+
 	free_http_context(&context);
 
+	curl_global_cleanup();
+
 	pcs_print_leak();
+
+	pcs_log("pcs exited\n");
+
 	return rc;
 }
 

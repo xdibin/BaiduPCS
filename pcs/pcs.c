@@ -1371,7 +1371,7 @@ PCS_API PcsRes pcs_setopt(Pcs handle, PcsOption opt, void *value)
 		pcs_http_setopt(pcs->http, PCS_HTTP_OPTION_CONNECTTIMEOUT, value);
 		break;
 	case PCS_OPTION_GID:
-		pcs->gid = pcs_utils_gid();
+		pcs->gid = pcs_utils_strdup((char *)value);;
 		break;
 	}
 	return res;

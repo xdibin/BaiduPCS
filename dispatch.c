@@ -13,8 +13,8 @@
 #include "dispatch.h"
 #include "utils_print.h"
 #include "error_code.h"
-#include "download.h"
-
+#include "task.h"
+#include "pcs_log.h"
 #include "xhttpd.h"
 
 /**
@@ -94,16 +94,41 @@ static int callback_login(HttpContext *context)
 	char *username = NULL;
 	char *password = NULL;	
 
-	/* get username and password */
-	username = PARAM_GET(context, "username");
-	password = PARAM_GET(context, "password");
+	pcs_log("enter\n");
 
-	if (!username || !*username || !password || !*password) {
+	xhttpd_http_t *xhttp = (xhttpd_http_t *)(context->http);
+	if (!xhttp || xhttp->method != XHTTPD_METHOD_POST || !(xhttp->content)) {
+		pcs_log("must post and json context\n");
 		return ERRCODE_ARG;
 	}
 
-	printf("username = '%s'\n", username);
-	printf("password = '%s'\n", password);
+	/* get username and password */
+	cJSON *item = NULL;
+	cJSON *root = cJSON_Parse(xhttp->content);
+	if (!root) {
+		pcs_log("parse json failed, %s\n", xhttp->content);
+		return ERRCODE_ARG;
+	}
+
+	item = cJSON_GetObjectItem(root, "username");
+	if (item && item->type == cJSON_String && item->valuestring && *(item->valuestring)) {
+		username = pcs_utils_strdup(item->valuestring);
+	}
+
+	item = cJSON_GetObjectItem(root, "password");
+	if (item && item->type == cJSON_String && item->valuestring && *(item->valuestring)) {
+		password = pcs_utils_strdup(item->valuestring);
+	}	
+
+	cJSON_Delete(root);
+
+	if (!username || !*username || !password || !*password) {
+		pcs_log("need username and password parameters\n");
+		return ERRCODE_ARG;
+	}
+
+	pcs_log("username = '%s'\n", username);
+	pcs_log("password = '%s'\n", password);
 
 	/* save the username and password */
 	pcs_setopt(context->pcs, PCS_OPTION_USERNAME, username);
@@ -111,17 +136,17 @@ static int callback_login(HttpContext *context)
 
 	pcsres = pcs_login(context->pcs);
 	if (pcsres != PCS_OK) {
-		printf("Login Failed: %s\n", pcs_strerror(context->pcs));
+		pcs_log("Login Failed: %s\n", pcs_strerror(context->pcs));
 		return ERRCODE_UNKNOWN;
 	}
-	printf("Login Success. UID: %s\n", pcs_sysUID(context->pcs));
+	pcs_log("Login Success. UID: %s\n", pcs_sysUID(context->pcs));
 
 	char buf[512];
 	int len = 0;
 
 	len = snprintf(buf, sizeof(buf), "{\"errno\":0}");
 
-	printf("json response is '%s', len = %d\n", buf, len);
+	pcs_log("json response is '%s', len = %d\n", buf, len);
 
 	http_response_by_xhttpd(context, buf, len);
 
@@ -142,7 +167,7 @@ static int callback_who(HttpContext *context)
 
 	len = snprintf(buf, sizeof(buf), "{\"errno\":0,\"username\":\"%s\"}", name);
 
-	printf("response is '%s', len = %d\n", buf, len);
+	pcs_log("response is '%s', len = %d\n", buf, len);
 
 	http_response_by_xhttpd(context, buf, len);
 
@@ -155,19 +180,19 @@ static int callback_logout(HttpContext *context)
 	
 	pcsres = pcs_logout(context->pcs);
 	if (pcsres != PCS_OK) {
-		printf("Logout Fail: %s\n", pcs_strerror(context->pcs));
+		pcs_log("Logout Fail: %s\n", pcs_strerror(context->pcs));
 
 		return ERRCODE_UNKNOWN;
 	}
 
-	printf("Logout Success.\n");
+	pcs_log("Logout Success.\n");
 
 	char buf[512];
 	int len = 0;
 
 	len = snprintf(buf, sizeof(buf), "{\"errno\":0}");
 
-	printf("json response is '%s', len = %d\n", buf, len);
+	pcs_log("json response is '%s', len = %d\n", buf, len);
 
 	http_response_by_xhttpd(context, buf, len);
 
@@ -179,7 +204,7 @@ static int json_list_file_init(char **json, int *capacity, int *remain)
 {
 	char *buf = NULL;
 
-	printf("init the list file json\n");
+	pcs_log("init the list file json\n");
 
 	buf = malloc(sizeof(char) * 512 * 1024);
 	if (!buf) {
@@ -203,7 +228,7 @@ static int json_list_file_end(char **json, int *capacity, int *remain, int has_m
 	int len = *capacity - *remain;
 	int inc = 0;
 
-	printf("end the list file json\n");
+	pcs_log("end the list file json\n");
 
 	if ((*json)[len - 1] == ',') {
 		(*json)[len - 1] = '\0';
@@ -225,7 +250,7 @@ static int json_list_file_end(char **json, int *capacity, int *remain, int has_m
 
 static void json_list_file_free(char **json)
 {
-	printf("free the list file json\n");
+	pcs_log("free the list file json\n");
 	if (*json) {
 		free(*json);
 		*json = NULL;
@@ -252,7 +277,7 @@ static int json_list_file_add(char **json, int *capacity, int *remain, PcsFileIn
 	char filename[1024];
 	int filename_len = sizeof(filename);
 
-	printf("add a list file json\n");
+	pcs_log("add a list file json\n");
 
 	if (*remain < (8192)) {
 		/* realloc a new large buffer */
@@ -341,7 +366,7 @@ static int callback_list(HttpContext *context)
 	int rc = 0;
 	int total = 0;	
 
-	printf("try to list %s\n", dir);
+	pcs_log("try to list %s\n", dir);
 
 	/* get the file list from server */
 	list = pcs_list(context->pcs, dir,
@@ -388,7 +413,7 @@ static int callback_list(HttpContext *context)
 		return rc;
 	}
 
-	printf("json response is '%s', len = %d\n", json, rc);
+	pcs_log("json response is '%s', len = %d\n", json, rc);
 
 	http_response_by_xhttpd(context, json, rc);
 
@@ -427,7 +452,7 @@ static int callback_meta(HttpContext *context)
 
 	fi = pcs_meta(context->pcs, path);
 	if (!fi) {
-		fprintf(stderr, "Error: The target not exist, or have error: %s\n", pcs_strerror(context->pcs));
+		pcs_log("Error: The target not exist, or have error: %s\n", pcs_strerror(context->pcs));
 		return ERRCODE_UNKNOWN;
 	}
 	
@@ -457,7 +482,7 @@ static int callback_meta(HttpContext *context)
 
 	pcs_fileinfo_destroy(fi);
 
-	printf("response is '%s', len = %d\n", buf, len);
+	pcs_log("response is '%s', len = %d\n", buf, len);
 
 	http_response_by_xhttpd(context, buf, len);
 
@@ -481,7 +506,7 @@ static int callback_quota(HttpContext *context)
 
 	pcsres = pcs_quota(context->pcs, &quota, &used);
 	if (pcsres != PCS_OK) {
-		fprintf(stderr, "Error: %s\n", pcs_strerror(context->pcs));
+		pcs_log("Error: %s\n", pcs_strerror(context->pcs));
 		return ERRCODE_UNKNOWN;
 	}
 
@@ -489,7 +514,7 @@ static int callback_quota(HttpContext *context)
 	len = snprintf(buf, sizeof(buf), "{\"errno\":0,\"total\":%lld,\"used\":%lld}",
 		quota, used);
 
-	printf("response is '%s', len = %d\n", buf, len);
+	pcs_log("response is '%s', len = %d\n", buf, len);
 
 	http_response_by_xhttpd(context, buf, len);
 
@@ -517,7 +542,7 @@ static int callback_download(HttpContext *context)
 
 	xhttpd_http_t *xhttp = (xhttpd_http_t *)(context->http);
 	if (!xhttp || xhttp->method != XHTTPD_METHOD_POST || !(xhttp->content)) {
-		printf("must post and json context\n");
+		pcs_log("must post and json context\n");
 		return ERRCODE_ARG;
 	}
 
@@ -529,7 +554,7 @@ static int callback_download(HttpContext *context)
 
 	root = cJSON_Parse(xhttp->content);
 	if (!root) {
-		printf("parse json failed, %s\n", xhttp->content);
+		pcs_log("parse json failed, %s\n", xhttp->content);
 		return ERRCODE_ARG;
 	}
 
@@ -545,23 +570,23 @@ static int callback_download(HttpContext *context)
 		cJSON_Delete(root);
 		return ERRCODE_ARG;
 	} else if (array_size > 1) {
-		printf("only support one task to download now\n");
+		pcs_log("only support one task to download now\n");
 	}
 
 	list = array->child;
 
 	item = cJSON_GetObjectItem(list, "rpath");
-	if (item && item->type == cJSON_String && item->valuestring && !*(item->valuestring)) {
+	if (item && item->type == cJSON_String && item->valuestring && *(item->valuestring)) {
 		rpath = pcs_utils_strdup(item->valuestring);
 	}
 
 	item = cJSON_GetObjectItem(list, "ldir");
-	if (item && item->type == cJSON_String && item->valuestring && !*(item->valuestring)) {
+	if (item && item->type == cJSON_String && item->valuestring && *(item->valuestring)) {
 		ldir = pcs_utils_strdup(item->valuestring);
 	}
 
 	item = cJSON_GetObjectItem(list, "lname");
-	if (item && item->type == cJSON_String && item->valuestring && !*(item->valuestring)) {
+	if (item && item->type == cJSON_String && item->valuestring && *(item->valuestring)) {
 		lname = pcs_utils_strdup(item->valuestring);
 	}
 
@@ -616,12 +641,12 @@ static int callback_download(HttpContext *context)
 	if (stat(ldir, &st) == -1) {
 		err = errno;
 		if (err != ENOENT) {
-			printf("stat ldir failed, %s, %s\n", ldir, strerror(err));
+			pcs_log("stat ldir failed, %s, %s\n", ldir, strerror(err));
 			ret = ERRCODE_LOCAL_FILE;
 			goto download_out;
 		} else {
 			/* create the dir */
-			printf("dir not exist\n");
+			pcs_log("dir not exist\n");
 			ret = ERRCODE_LOCAL_FILE;
 			goto download_out;
 		}
@@ -644,7 +669,7 @@ static int callback_download(HttpContext *context)
 		} else {
 			/* check force overwrite flag is set or not ? */
 			if (force == 0) {
-				printf("file exist not force overwrite is not set!\n");
+				pcs_log("file exist not force overwrite is not set!\n");
 				ret =  ERRCODE_LOCAL_FILE;
 				goto download_out;
 			} else {
@@ -658,6 +683,8 @@ static int callback_download(HttpContext *context)
 		}
 	}
 
+	pcs_log("rpath = %s, lpath = %s\n", rpath, lpath);
+
 	/* check remote file */
 	PcsFileInfo *meta = pcs_meta(context->pcs, rpath);
 	if (!meta) {
@@ -666,12 +693,22 @@ static int callback_download(HttpContext *context)
 	}
 
 	if (meta->isdir) {
-		printf("not support of dir download\n");
+		pcs_log("not support of dir download\n");
 		ret = ERRCODE_REMOTE_FILE;
 		goto download_out;
 	}
 
-	ret = download_task_add(context, rpath, meta->md5, (uint64_t)(meta->size), lpath, lname);
+	ret = task_add(context, rpath, meta->md5, (uint64_t)(meta->size), lpath);
+
+	char buf[512];
+	int len = 0;
+
+	memset(buf, 0, sizeof(buf));
+	len = snprintf(buf, sizeof(buf), "{\"errno\":%d}", ret);
+
+	pcs_log("response is '%s', len = %d\n", buf, len);
+
+	http_response_by_xhttpd(context, buf, len);	
 
 download_out:
 	if (rpath) pcs_free(rpath);
@@ -692,7 +729,7 @@ static void http_response_error(HttpContext *context, int error_code)
 
 	len = snprintf(buf, sizeof(buf), "{\"errno\":%d}", error_code);
 
-	printf("error code = %d, response = %s\n", error_code, buf);
+	pcs_log("error code = %d, response = %s\n", error_code, buf);
 
 	http_response_by_xhttpd(context, buf, len);
 
@@ -736,7 +773,7 @@ static int http_dispatch(HttpContext *context)
 
 	xhttpd_http_t *http = (xhttpd_http_t *)(context->http);
 	assert(http != NULL);
-	printf("uri = '%s'\n", http->uri);
+	pcs_log("uri = '%s'\n", http->uri);
 
 	method = strrchr(http->uri, '/');
 	assert(method != NULL);
@@ -749,18 +786,18 @@ static int http_dispatch(HttpContext *context)
 	method++;
 
 	if (!is_http_login(context)) {
-		printf("not login the server\n");
+		pcs_log("not login the server\n");
 		is_login = 0;
 	}
 	else {
-		printf("have logined\n");
+		pcs_log("have logined\n");
 		is_login = 1;
 	}
 
 	/* need check it every time */
 	if ((is_login == 0) && strcmp(method, "login") != 0) {
 		/* not logined and not a login request */
-		//printf("not logined and not a login request\n");
+		pcs_log("not logined and not a login request\n");
 		http_response_error(context, ERRCODE_NOT_LOGIN);
 
 		return 0;
@@ -811,6 +848,8 @@ static xhttpd_t *http_int_by_xhttpd(HttpContext *context)
 	int rc = 0;
 	struct sockaddr_in addr;
 
+	pcs_log("init http by xhttpd backend\n");
+
 	memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(8888);
@@ -820,7 +859,7 @@ static xhttpd_t *http_int_by_xhttpd(HttpContext *context)
 		http_callback_by_xhttpd,
 		(struct sockaddr *)&addr, sizeof(addr));
 	if (rc != 0) {
-		printf("init xhttpd server failed\n");
+		pcs_log("init xhttpd server failed\n");
 		return NULL;
 	}
 
@@ -873,6 +912,7 @@ int http_loop(HttpContext *context)
 		return -1;
 	}
 
+	pcs_log("xhttpd looping ...\n");
 	xhttpd_loop(xhttpd);
 
 	http_exit_by_xhttpd(xhttpd);
