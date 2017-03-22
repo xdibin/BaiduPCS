@@ -19,6 +19,7 @@
 #include "pcs_http.h"
 #include "cJSON.h"
 #include "pcs.h"
+#include "pcs_passport_dv.h"
 
 #ifdef WIN32
 #ifndef __MINGW32__
@@ -1692,6 +1693,7 @@ static char *pcs_get_pass_v3_jump_url(__in Pcs handle, char *html)
 }
 
 static PcsRes pcs_dologin(__in Pcs handle,
+	__in int64_t starttime,
 	__in const char *code_string,
 	__in const char *token,
 	__out int *errorno,
@@ -1699,7 +1701,7 @@ static PcsRes pcs_dologin(__in Pcs handle,
 {
 	struct pcs *pcs = (struct pcs *)handle;
 	PcsRes res;
-	char captch[32], *post_data, *html;
+	char captch[32], *post_data, *html, *dv;
 	const char *errmsg;
 
 	memset(captch, 0, sizeof(captch));
@@ -1714,6 +1716,11 @@ static PcsRes pcs_dologin(__in Pcs handle,
 
 	char callback_str[48] = "parent.";
 	strcat(callback_str, pcs_jsoncallback_random());
+
+	if (passport_build_dv(&dv, starttime, pcs->username)) {
+		pcs_set_errmsg(handle, "Can't build 'dv'.");
+		return PCS_BUILD_POST_DATA;
+	}
 
 	post_data = pcs_http_build_post_data(pcs->http,
 		"staticpage", "http://pan.baidu.com/res/static/thirdparty/pass_v3_jump.html",
@@ -1742,9 +1749,12 @@ static PcsRes pcs_dologin(__in Pcs handle,
 		"crypttype", "",
 		"ppui_logintime", "10517",
 		"countrycode", "",
-		"dv", "MDEwAAoAzgAKAUoADwAAAF00AA0CABvLy8FidCBhL2g6ezZpNmY1ZToOUQ59CGoHbhoJAgAi3dk-P4OBgYGBh8TEkNGf2IrLhtmG1oXVir7hvs242rfeqggCACbW09DRCwsLD0AUVRtcDk8CXQJSAVEOOmU6STxeM1oueQtqGmoPfQcCAATLy8vLEwIAGcve3t62wrbG_NP8jO2Drc-ux6PW-Jv0mbYWAgAi6p71xevS59_n0uvb7d3s1efU59_n1uLa49fv2u_X5tbu2RUCAAjLy8qQXB5VcQECAAbLw8PNWugFAgAEy8vLwQQCAAbJycvK_8kXAgAMycna2t3tlaWJ6oatEAIAAcsGAgAoy8vLy8vLy8vLy8yjo6OgNDQ0M7Ozs7ePj4-ICAgIDBwcHBubm5ufjwcCAATLy8vLDQIAG8vLzYWTx4bIj92c0Y7RgdKC3em26ZrvjeCJ_Q",
+		"dv", dv,
 		"callback", callback_str,
 		NULL);
+
+	pcs_free(dv);
+
 	if (!post_data) {
 		pcs_set_errmsg(handle, "Can't build the post data.");
 		return PCS_BUILD_POST_DATA;
@@ -2091,6 +2101,7 @@ PCS_API PcsRes pcs_login(Pcs handle)
 	char *html = NULL;
 	char *token = NULL, *code_string = NULL;
 	int error = -1, retry_times;
+	int64_t starttime;
 
 	res = pcs_prelogin(handle, &token, &code_string);
 	if (res != PCS_OK) {
@@ -2098,14 +2109,16 @@ PCS_API PcsRes pcs_login(Pcs handle)
 		pcs_free(code_string);
 		return res;
 	}
-	printf("%s %d %s : prelogin ok\n", __FILE__, __LINE__, __FUNCTION__);
+
+	starttime = pcs_jstime() - 20000; /* 设置为 20秒 前打开的页面 */
+
 	retry_times = 0;
 
 try_login:
 	
 	pcs_free(html);
 	html = NULL;
-	res = pcs_dologin(handle, code_string, token, &error, &html);
+	res = pcs_dologin(handle, starttime, code_string, token, &error, &html);
 	if (res != PCS_OK) {
 		pcs_free(token);
 		pcs_free(code_string);
