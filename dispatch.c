@@ -141,6 +141,8 @@ static int callback_login(HttpContext *context)
 	}
 	pcs_log("Login Success. UID: %s\n", pcs_sysUID(context->pcs));
 
+	pcs_cookie_flush(context->pcs);
+
 	char buf[512];
 	int len = 0;
 
@@ -186,6 +188,8 @@ static int callback_logout(HttpContext *context)
 	}
 
 	pcs_log("Logout Success.\n");
+
+	pcs_cookie_flush(context->pcs);
 
 	char buf[512];
 	int len = 0;

@@ -36,10 +36,14 @@
 #endif
 
 #ifndef HTTP_CONNECT_TIMEOUT
-#define HTTP_CONNECT_TIMEOUT	2
+#define HTTP_CONNECT_TIMEOUT	4
 #endif
 
 #define URL_SIZE_MAX			8192
+
+#define SUBTASK_MAX				8
+
+#define FILE_SLICE_MIN			(1 << 20)
 
 /**
  * @brief HTTP上下文定义
@@ -68,7 +72,7 @@ typedef struct HttpContext {
 
 	char		*user_agent;    /**< 浏览器代理 */
 
-	void		*http;			/**< http协议相关的参数 */
+	void		*http;			/**< xhttp协议相关的参数 */
 
 	int			subtask_max;	/**< 每个HTTP文件下载任务的最大子任务个数 */
 	int			file_slice_size_min;	/**< 每个HTTP文件下载任务的最小文件分片尺寸 */

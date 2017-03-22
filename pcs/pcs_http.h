@@ -140,6 +140,14 @@ PCS_API char *pcs_http_build_post_data(PcsHttp handle, ...);
 */
 PCS_API char *pcs_http_get_cookie(PcsHttp handle, const char *cookie_name);
 
+/**
+ * 将cookie写入到文件中
+ *
+ */
+PCS_API int pcs_http_cookie_flush(PcsHttp handle);
+
+PCS_API const void *pcs_http_curl_ref_get(PcsHttp handle);
+
 /*
  * 获取最后一次请求时服务器的返回内容
  * 如果从未从服务器请求数据则返回NULL。不需要调用pcs_free释放内存。

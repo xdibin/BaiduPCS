@@ -309,8 +309,8 @@ static void init_http_context(HttpContext *context)
 	context->max_speed_per_thread = 0;
 	context->max_upload_speed_per_thread = 0;
 
-	context->subtask_max = 2;
-	context->file_slice_size_min = (16 << 20);
+	context->subtask_max = SUBTASK_MAX;
+	context->file_slice_size_min = FILE_SLICE_MIN;
 
 	context->user_agent = pcs_utils_strdup(USAGE);
 }

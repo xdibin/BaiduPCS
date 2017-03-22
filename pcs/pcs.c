@@ -3069,6 +3069,18 @@ PCS_API char *pcs_cookie_data(Pcs handle)
 	return pcs_http_cookie_data(pcs->http);
 }
 
+PCS_API int pcs_cookie_flush(Pcs handle)
+{
+	struct pcs *pcs = (struct pcs *)handle;
+	return pcs_http_cookie_flush(pcs->http);
+}
+
+PCS_API const void *pcs_curl_ref_get(Pcs handle)
+{
+	struct pcs *pcs = (struct pcs *)handle;
+	return pcs_http_curl_ref_get(pcs->http);
+}
+
 PCS_API const char *pcs_req_rawdata(Pcs handle, int *size, const char **encode)
 {
 	struct pcs *pcs = (struct pcs *)handle;

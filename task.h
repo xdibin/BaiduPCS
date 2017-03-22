@@ -52,9 +52,19 @@ struct task;
 
 typedef struct task_sub {
     struct task *task;  /**< 回指向task的指针 */
+    int task_id;        /**< 任务ID */
     CURL *curl;         /**< CURL句柄 */
     task_file_slice_t *file_slice;   /**< 该HTTP子任务操作哪个文件分片 */
+    uint64_t download_size;
 } task_sub_t;
+
+
+enum task_subtask_type {
+    SUBTASK_TYPE_NONE = 0,          /**< 错误类型 */
+    SUBTASK_TYPE_ONE_LESS = 1,      /**< 有且仅有一片 */
+    SUBTASK_TYPE_MID_LESS = 2,      /**< 有1-max片，且每片都小于min size */
+    SUBTASK_TYPE_MAX_LARGE = 3     /**< 有max片，且每片都大于min size */
+};
 
 typedef struct task {
     struct task *prev;      /**< 指向前一个任务 */
@@ -71,6 +81,7 @@ typedef struct task {
     task_status_t status;       /**< 任务的当前状态 */
 
     time_t start_ts;            /**< 任务开始时间 */
+    time_t download_ts;         /**< 任务下载总时间 */
     time_t complete_ts;         /**< 任务完成时间 */
     time_t used_ts;             /**< 任务下载总用时 */
 
@@ -81,6 +92,7 @@ typedef struct task {
     CURLM *cm;              /*< CURLM句柄 */
     int subtask_cnt;        /**< CURL子任务个数 */
     task_sub_t *subtask;    /**< CURL子任务列表 */
+    enum task_subtask_type subtask_type;
     task_file_t *file;      /**< 任务的文件句柄 */
 
     int buffer_cnt;         /**< 任务使用的缓冲区块数 */

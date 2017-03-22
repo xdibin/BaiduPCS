@@ -1037,6 +1037,23 @@ PCS_API char *pcs_http_cookie_data(PcsHttp handle)
 	return data;
 }
 
+PCS_API int pcs_http_cookie_flush(PcsHttp handle)
+{
+	struct pcs_http *http = (struct pcs_http *)handle;
+	CURLcode rc = curl_easy_setopt(http->curl, CURLOPT_COOKIELIST, "FLUSH");
+	if (rc != CURLE_OK) {
+		return -1;
+	} else {
+		return 0;
+	}
+}
+
+PCS_API const void *pcs_http_curl_ref_get(PcsHttp handle)
+{
+	struct pcs_http *http = (struct pcs_http *)handle;
+	return http->curl;
+}
+
 PCS_API const char *pcs_http_rawdata(PcsHttp handle, int *size, const char **encode)
 {
 	struct pcs_http *http = (struct pcs_http *)handle;

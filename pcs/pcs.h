@@ -458,6 +458,14 @@ PCS_API PcsFileInfo *pcs_rapid_upload_r(Pcs handle, const char *path, PcsBool ov
 */
 PCS_API char *pcs_cookie_data(Pcs handle);
 
+/**
+ * 将cookie写入到文件中
+ *
+ */
+PCS_API int pcs_cookie_flush(Pcs handle);
+
+PCS_API const void *pcs_curl_ref_get(Pcs handle);
+
 /*
 * 获取最后一次请求的原始数据。
 * @size 用于接收原始数据的长度

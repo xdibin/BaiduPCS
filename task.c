@@ -96,25 +96,27 @@ int task_list_exit()
      return 0;
 }
 
-
-
-
-
-static int task_subtask_cnt_get(task_t *task)
+static int task_subtask_slice(task_t *task)
 {
     struct HttpContext *context = (struct HttpContext *)(task->http_context);
 
     if (task->total_size <= context->file_slice_size_min) {
-        task->subtask_cnt = 1;        
+        task->subtask_cnt = 1;
+        task->subtask_type = SUBTASK_TYPE_ONE_LESS;     
     } else if ( task->total_size >= (context->file_slice_size_min * context->subtask_max) ) {
         /* 最多分 subtask_max 片，且每片大于 file_slice_size_min */
         task->subtask_cnt = context->subtask_max;
+        task->subtask_type = SUBTASK_TYPE_MAX_LARGE;
     } else {
-        /* 除最后一片外，其余每片大于为  file_slice_size_min */
-        task->subtask_cnt = task->total_size / context->file_slice_size_min + 1;
+        /* 每片小于  file_slice_size_min */
+        task->subtask_cnt = task->total_size / context->file_slice_size_min;
+        if (task->total_size % context->file_slice_size_min) {
+            task->subtask_cnt++;
+        }
+        task->subtask_type = SUBTASK_TYPE_MID_LESS;
     }
 
-    return task->subtask_cnt;
+    task->subtask_cnt;
 }
 
 
@@ -124,13 +126,13 @@ static int task_url_build(task_t *task)
 
     CURL *curl = curl_easy_init();
     if (curl == NULL) {
-        printf("init curl failed\n");
+        pcs_log("init curl failed\n");
         return -1;
     }
 
     char *url = (char *)pcs_malloc(URL_SIZE_MAX);
     if (!url) {
-        printf("malloc for url failed\n");
+        pcs_log("malloc for url failed\n");
         curl_easy_cleanup(curl);
         return -1;
     }
@@ -144,7 +146,7 @@ static int task_url_build(task_t *task)
     char *str = curl_easy_escape(curl, task->rpath, strlen(task->rpath));
     
     if (!str) {
-        printf("curl_easy_escape failed, %s\n", task->rpath);
+        pcs_log("curl_easy_escape failed, %s\n", task->rpath);
         pcs_free(url);
         curl_easy_cleanup(curl);
         return -1;
@@ -165,6 +167,8 @@ static int task_url_build(task_t *task)
 static int task_init_memory(task_t *task)
 {
     int subtask_cnt = task->subtask_cnt;
+
+    pcs_log("init task memory\n");
 
     task->subtask = (task_sub_t *)pcs_malloc(sizeof(task_sub_t) * subtask_cnt);
     if (task->subtask == NULL) {
@@ -197,61 +201,41 @@ static int task_init_file(task_t *task)
     int i = 0;
     uint64_t offset = 0;
     int err = 0;
+    int ret = 0;
 
-    if (subtask_cnt < context->subtask_max) {         
+    pcs_log("init task file structure\n");
+
+    if (task->subtask_type == SUBTASK_TYPE_ONE_LESS) {
+        /* 有且仅有一片 */
+        file->slices[0].offset_base = 0;
+        file->slices[0].slice_size = task->total_size;
+        file->slices[0].offset_current = 0;
+    } else if (task->subtask_type == SUBTASK_TYPE_MID_LESS || SUBTASK_TYPE_MAX_LARGE) {
         offset = 0;
         i = 0;
-        /* 前 subtask_cnt - 1 个，每个大小为 file_slice_size_min */
+        uint64_t size = task->total_size / subtask_cnt;
+        /* 前 subtask_cnt - 1 个，每个大小为 total_size / subtask_cnt */
         for (i = 0; i < subtask_cnt - 1; i++) {
             file->slices[i].offset_base = offset;
-            file->slices[i].slice_size = context->file_slice_size_min;
+            file->slices[i].slice_size = size;
             file->slices[i].offset_current = offset;
-            offset += context->file_slice_size_min;
+            offset += size;
         }
         /* 最后一片 */                   
         file->slices[i].offset_base = offset;
         file->slices[i].slice_size = task->total_size - offset;
         file->slices[i].offset_current = offset;        
-    } else {
-        /* 前subtask_max - 1大小相等，有两种可能:
-         * 1. 前subtask_max - 1片都是 file_slice_size_min， 最后一片小于或等于file_slice_size_min
-         * 2. 所有片都大于file_slice_size_min (= file_size / subtask_max)，最后一片最大
-         */
-         if ((subtask_cnt * context->file_slice_size_min) <= 
-            (context->subtask_max * context->file_slice_size_min)) {
-                //第一种情况
-                offset = 0;
-                i = 0;
-                /* 前 subtask_cnt - 1 个，每个大小为 file_slice_size_min */
-                for (i = 0; i < subtask_cnt - 1; i++) {
-                    file->slices[i].offset_base = offset;
-                    file->slices[i].slice_size = context->file_slice_size_min;
-                    file->slices[i].offset_current = offset;
-                    offset += context->file_slice_size_min;
-                }
-                /* 最后一片 */                   
-                file->slices[i].offset_base = offset;
-                file->slices[i].slice_size = task->total_size - offset;
-                file->slices[i].offset_current = offset; 
-            } else {
-                //第二种情况
-                offset = 0;
-                i = 0;
-                /* 前 subtask_cnt - 1 个，每个大小为 file_size / subtask_max */
-                uint64_t each_size = task->total_size / context->subtask_max;
-
-                for (i = 0; i < subtask_cnt - 1; i++) {
-                    file->slices[i].offset_base = offset;
-                    file->slices[i].slice_size = each_size;
-                    file->slices[i].offset_current = offset;
-                    offset += each_size;
-                }
-                /* 最后一片 */                   
-                file->slices[i].offset_base = offset;
-                file->slices[i].slice_size = task->total_size - offset;
-                file->slices[i].offset_current = offset;                     
-            }
     }
+
+    printf("%4s %16s %16s\n", "task", "offset", "size");
+    printf("%4s %16s %16s\n", "----", "---------------", "---------------");
+    for (i = 0; i < subtask_cnt; i++) {
+        printf("%4d %16llu %16llu\n", 
+            i, 
+            (unsigned long long)(file->slices[i].offset_base), 
+            (unsigned long long)(file->slices[i].slice_size));
+    }
+    printf("%4s %16s %16s\n", "----", "---------------", "---------------");
 
     /* open the file for writing */
     /**
@@ -268,6 +252,12 @@ static int task_init_file(task_t *task)
         return -1;
     }
 
+    /* allocate the disk space */
+    ret = posix_fallocate(task->file->fd, 0, task->total_size);
+    if (ret != 0) {
+        pcs_log("posix_fallocate failed, %s\n", strerror(ret));
+    }
+
     printf("create file fd = %d\n", task->file->fd);
 
     return 0;
@@ -275,9 +265,7 @@ static int task_init_file(task_t *task)
 
 static size_t task_file_write_callback(char *buffer, size_t size, size_t nmemb, void *userp)
 {
-    printf("task_file_write_callback called, buffer %p, size = %u, nmemb = %u\n", buffer, (unsigned int)size, (unsigned int)nmemb);
-
-    printf("buffer = '%s'\n", buffer);
+    //pcs_log("task_file_write_callback called, buffer %p, size = %u, nmemb = %u\n", buffer, (unsigned int)size, (unsigned int)nmemb);
 
     assert(userp != NULL);
 
@@ -292,13 +280,16 @@ static size_t task_file_write_callback(char *buffer, size_t size, size_t nmemb, 
     task_file_slice_t *slice = subtask->file_slice;
 
     size_t recv_size = size * nmemb;
+
+    subtask->download_size += recv_size;
     
-    printf("file fd = %d\n", file->fd);
+    //pcs_log("file fd = %d, offset = %llu, recv size = %u\n", 
+    //    file->fd, (unsigned long long)(slice->offset_current), (unsigned int)recv_size);
 
     /* 修改文件指针位置 */
     if (lseek(file->fd, slice->offset_current, SEEK_SET) == -1) {
         err = errno;
-        printf("lseek failed, %s %s\n", task->lpath, strerror(err));
+        pcs_log("lseek failed, %s %s\n", task->lpath, strerror(err));
         return 0; // return 0 to terminate the curl transform
     }
 
@@ -306,21 +297,53 @@ static size_t task_file_write_callback(char *buffer, size_t size, size_t nmemb, 
     ret = write(file->fd, buffer, recv_size);
     if (ret == -1) {
         err = errno;
-        printf("write to file failed, %s, fd %d, %s\n", task->lpath, file->fd, strerror(err));
+        pcs_log("write to file failed, %s, fd %d, %s\n", task->lpath, file->fd, strerror(err));
         return 0;
     }
 
     if (ret != recv_size) {
-        printf("write truncated, expect %u, but only %u\n", (unsigned int)recv_size, (unsigned int)ret);
+        pcs_log("write truncated, expect %u, but only %u\n", (unsigned int)recv_size, (unsigned int)ret);
         return 0;
     }
 
+    slice->offset_current += recv_size;
     task->download_size += recv_size;
 
     return recv_size;
 }
 
+#if 0
+static int task_cookie_clone(task_t *task, CURL *curl)
+{
+    CURL *curl_ref = NULL;
+    struct HttpContext *context = (struct HttpContext *)(task->http_context);
+    CURLcode rc;
+    struct curl_slist *cookies;
+    struct curl_slist *nc;
 
+    curl_ref = (CURL *)pcs_curl_ref_get(context->pcs);
+
+    if (!curl_ref) {
+        return -1;
+    }
+    
+    rc = curl_easy_getinfo(curl, CURLINFO_COOKIELIST, &cookies);
+    if(rc != CURLE_OK || cookies == NULL) {
+        return -1;
+    }
+
+    for (nc = cookies; nc; nc = nc->next) {
+        rc = curl_easy_setopt(curl, CURLOPT_COOKIELIST, nc->data);
+        if (rc != CURLE_OK) {
+            pcs_log("add cookie failed, [%s]\n", nc->data);
+        }
+    }
+
+    curl_slist_free_all(cookies);
+
+    return 0;
+}
+#endif
 
 static int task_init_curl(task_t *task)
 {
@@ -332,17 +355,36 @@ static int task_init_curl(task_t *task)
     int i = 0;
     char range[128];
 
+    CURLcode rc;
+    CURL *curl_ref = NULL;
+    struct curl_slist *cookies;
+    struct curl_slist *nc;   
+
+    pcs_log("init task curls\n");
+
     /* 计算请求url */
     if ( task_url_build(task) != 0) {
         return -1;
     }
 
     pcs_log("task url is %s\n", task->url);
-    pcs_log("cookie file is '%s'\n", context->cookiefile);
+    pcs_log("cookie file is '%s'\n", context->cookiefile);    
+
+    curl_ref = (CURL *)pcs_curl_ref_get(context->pcs);
+
+    if (!curl_ref) {
+        pcs_log("get curl handle failed\n");
+        assert(0);
+    }
+    
+    rc = curl_easy_getinfo(curl_ref, CURLINFO_COOKIELIST, &cookies);
+    if(rc != CURLE_OK || cookies == NULL) {
+        pcs_log("get cookie failed\n");
+    } 
 
     task->cm = curl_multi_init();
     if (task->cm == NULL) {
-        printf("curl_multi_init failed\n");
+        pcs_log("curl_multi_init failed\n");
         return -1;
     }
 
@@ -351,23 +393,25 @@ static int task_init_curl(task_t *task)
     offset = 0;
     for (i = 0; i < subtask_cnt; i++) {
         task->subtask[i].task = task;
+        task->subtask[i].task_id = i;
         task->subtask[i].file_slice = task->file->slices + i;
 
         curl = curl_easy_init();
         if (curl == NULL) {
-            printf("init curl %d failed\n", i);
+            pcs_log("init curl %d failed\n", i);
             return -1;
         }
+        
+        curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, task_file_write_callback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, task->subtask + i);
         curl_easy_setopt(curl, CURLOPT_HEADER, 0L);
         curl_easy_setopt(curl, CURLOPT_URL, task->url);
         //curl_easy_setopt(curl, CURLOPT_PRIVATE, NULL);
-        curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-                
+                        
         snprintf(range, sizeof(range) - 1, "%llu-%llu", 
-            (unsigned long long)offset, (unsigned long long)(task->subtask[i].file_slice->slice_size));
+            (unsigned long long)offset, (unsigned long long)(offset + task->subtask[i].file_slice->slice_size - 1));
         
         printf("set subtask %d range, %s\n", i, range);
 
@@ -376,8 +420,8 @@ static int task_init_curl(task_t *task)
 
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
-        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
+        //curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
+        //curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
         curl_easy_setopt(curl, CURLOPT_USERAGENT, context->user_agent);        
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
@@ -385,15 +429,24 @@ static int task_init_curl(task_t *task)
         curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
         curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 	    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, HTTP_CONNECT_TIMEOUT);
-	    curl_easy_setopt(curl, CURLOPT_TIMEOUT, HTTP_TIMEOUT);
+	    //curl_easy_setopt(curl, CURLOPT_TIMEOUT, HTTP_TIMEOUT);
 
+        //curl_easy_setopt(curl, CURLOPT_COOKIEFILE, context->cookiefile);
+        //curl_easy_setopt(curl, CURLOPT_COOKIEJAR, context->cookiefile);
 
-        curl_easy_setopt(curl, CURLOPT_COOKIEFILE, context->cookiefile);
-        curl_easy_setopt(curl, CURLOPT_COOKIEJAR, context->cookiefile);
+        /* add cookies */
+        for (nc = cookies; nc; nc = nc->next) {
+            rc = curl_easy_setopt(curl, CURLOPT_COOKIELIST, nc->data);
+            if (rc != CURLE_OK) {
+                pcs_log("add cookie failed, [%s]\n", nc->data);
+            }
+        }
                
         task->subtask[i].curl = curl;
         curl_multi_add_handle(task->cm, task->subtask[i].curl);
     }
+
+    curl_slist_free_all(cookies);
 
     return 0;
 }
@@ -405,8 +458,10 @@ static int task_init(task_t *task)
     int i = 0;
     int subtask_cnt = 0;
 
+    pcs_log("init task\n");
+
     /* get the subtask count */   
-    subtask_cnt = task_subtask_cnt_get(task);
+    subtask_cnt = task_subtask_slice(task);
     
     if (task_init_memory(task) != 0) {
         ret = ERRCODE_MEMORY;
@@ -463,6 +518,28 @@ init_failed:
 
 static int task_exit(task_t *task)
 {
+    pcs_log("task exit\n");
+
+    char time_str[128];
+
+    unsigned int speed = task->download_size / task->download_ts;
+
+    printf("file name        : %s\n", task->lpath);
+    printf("total size       : %llu\n", (unsigned long long)(task->total_size));
+    printf("download size    : %llu\n", (unsigned long long)(task->download_size));
+    printf("start time       : %s", ctime_r(&(task->start_ts), time_str));
+    printf("stop time        : %s", ctime_r(&(task->complete_ts), time_str));
+    printf("download time    : %u\n", (unsigned int)(task->download_ts));
+    printf("download speed   : %u Bytes/s, %.3f KB/s, %.3f MB/s\n", 
+        speed, ((double)speed) / 1024, ((double)speed) / (1024 * 1024));
+
+    int i;
+    printf("\n%4s %16s\n", "task", "download size");
+    printf("---- ----------------\n");
+    for (i = 0; i < task->subtask_cnt; i++) {
+        printf("%4d %16llu\n", i, (unsigned long long)(task->subtask[i].download_size));
+    }
+    printf("---- ----------------\n");
 
     return 0;
 }
@@ -481,7 +558,12 @@ static int task_loop(task_t *task)
 
     long curl_timeout = -1;
 
-    printf("task loop ...\n");
+    time_t ts_1;
+    time_t ts_2;
+
+    time(&ts_1);
+
+    pcs_log("task loop ...\n");
 
     do {
 
@@ -512,7 +594,7 @@ static int task_loop(task_t *task)
         mc = curl_multi_fdset(task->cm, &fdread, &fdwrite, &fdexcep, &maxfd);
     
         if(mc != CURLM_OK) {
-            printf("curl_multi_fdset() failed, code %d.\n", mc);
+            pcs_log("curl_multi_fdset() failed, code %d.\n", mc);
             break;
         }
 
@@ -534,7 +616,12 @@ static int task_loop(task_t *task)
         }
     } while (still_running);
 
+    time(&ts_2);
+    
+    task->complete_ts = ts_2;
 
+    task->download_ts += (ts_2 - ts_1);
+    
     return 0;
 }
 
