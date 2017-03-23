@@ -774,7 +774,11 @@ static void xhttpd_accept_callback(struct ev_loop *loop, ev_io *watcher, int rev
     ev_io_start(loop, watcher_client);
 }
 
-
+static void
+sigint_cb (struct ev_loop *loop, ev_signal *w, int revents)
+{
+  ev_break (loop, EVBREAK_ALL);
+}
 
 int xhttpd_init(xhttpd_t **xhttp, void *user_data,
 	void (*get_requst_callback)(xhttpd_http_t *http),
@@ -812,11 +816,7 @@ int xhttpd_init(xhttpd_t **xhttp, void *user_data,
 		return -1;
 	}
 
-#ifdef __MIPSF450__
-    struct ev_loop *loop = ev_loop_new(EVBACKEND_SELECT | EVFLAG_NOENV);
-#else
     struct ev_loop *loop = ev_loop_new(EVBACKEND_EPOLL | EVFLAG_NOENV);
-#endif
 
 	if (!loop) {
 		//printf("http: new loop failed\n");
@@ -849,6 +849,10 @@ int xhttpd_init(xhttpd_t **xhttp, void *user_data,
 	xhttp_new->user_data = user_data;
 
 	*xhttp = xhttp_new;
+
+    ev_signal signal_watcher;
+    ev_signal_init (&signal_watcher, sigint_cb, SIGINT);
+    ev_signal_start (loop, &signal_watcher);    
     
 	return 0;
 }

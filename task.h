@@ -13,7 +13,7 @@ typedef enum task_status {
     TASK_STATUS_COMPLETE,
     TASK_STATUS_REMOTE_ERROR,
     TASK_STATUS_LOCAL_ERROR,
-    TASK_STATUS_NETWORK_ERROR
+    TASK_STATUS_NETWORK_ERROR,
 } task_status_t;
 
 
@@ -56,6 +56,8 @@ typedef struct task_sub {
     CURL *curl;         /**< CURL句柄 */
     task_file_slice_t *file_slice;   /**< 该HTTP子任务操作哪个文件分片 */
     uint64_t download_size;
+    task_status_t status;
+    int http_code;
 } task_sub_t;
 
 
@@ -70,6 +72,7 @@ typedef struct task {
     struct task *prev;      /**< 指向前一个任务 */
     struct task *next;      /**< 指向下一个任务 */
 
+    unsigned int task_id;   /**< 任务的ID */
     char *url;              /**< 任务的URL地址 */
     char *rpath;            /**< 文件的远端地址 */
     char *lpath;            /**< 文件的本端地址 */
@@ -85,7 +88,7 @@ typedef struct task {
     time_t complete_ts;         /**< 任务完成时间 */
     time_t used_ts;             /**< 任务下载总用时 */
 
-    unsigned int tid;           /**<  */
+    unsigned int tpid;          /**< Linux thread pid */
 
     void *http_context;         /**< HttpContext上下文句柄 */
     

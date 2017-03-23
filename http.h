@@ -45,6 +45,9 @@
 
 #define FILE_SLICE_MIN			(1 << 20)
 
+typedef void (*signal_handle_t)(int signo);
+
+
 /**
  * @brief HTTP上下文定义
  *
@@ -76,6 +79,10 @@ typedef struct HttpContext {
 
 	int			subtask_max;	/**< 每个HTTP文件下载任务的最大子任务个数 */
 	int			file_slice_size_min;	/**< 每个HTTP文件下载任务的最小文件分片尺寸 */
+
+	signal_handle_t	sig_handle;
 } HttpContext;
+
+extern volatile int g_pcs_running;
 
 #endif

@@ -13,6 +13,8 @@
 
 #include <pthread.h>
 
+#include <syscall.h> //for syscall(SYS_gettid)
+
 #include <curl/curl.h>
 #include <curl/multi.h>
 
@@ -56,6 +58,8 @@ int task_list_init()
 {
     int ret = 0;
 
+    pcs_log("task list init ...\n");
+
     task_list_t *list = (task_list_t *)pcs_malloc(sizeof(task_list_t));
     assert(list != NULL);
 
@@ -92,6 +96,7 @@ int task_list_init()
 int task_list_exit()
 {
     //TODO: 
+    pcs_log("task list exit ...\n");
 
      return 0;
 }
@@ -116,7 +121,7 @@ static int task_subtask_slice(task_t *task)
         task->subtask_type = SUBTASK_TYPE_MID_LESS;
     }
 
-    task->subtask_cnt;
+    return task->subtask_cnt;
 }
 
 
@@ -196,7 +201,6 @@ static int task_init_memory(task_t *task)
 static int task_init_file(task_t *task)
 {
     int subtask_cnt = task->subtask_cnt;
-    struct HttpContext *context = (struct HttpContext *)(task->http_context);
     task_file_t *file = task->file;
     int i = 0;
     uint64_t offset = 0;
@@ -263,6 +267,76 @@ static int task_init_file(task_t *task)
     return 0;
 }
 
+static size_t task_head_recv_callback(char *buffer, size_t size, size_t nmemb, void *userp)
+{
+    size_t recv_size = size * nmemb;
+    task_sub_t *subtask = (task_sub_t *)userp;
+
+    //pcs_log("recv http head\n");
+
+    assert(subtask != NULL);
+
+    if (subtask->status == TASK_STATUS_DOWNLOADING) {
+        return recv_size;
+    }
+
+    /* 分析HTTP响应头 
+     * HTTP状态码必须是 2xx，如：
+     * 200 OK
+     * 206 Partial Content
+     */
+     char line[128];
+     char *ptr = line;
+     char *end = line + sizeof(line) - 2;
+     char *start = NULL;
+     int http_code = 0;
+
+     memset(line, 0, sizeof(line));
+
+     memcpy(line, buffer, sizeof(line) - 2);
+
+     if (memcmp(line, "HTTP/1.1", 8) != 0) {
+         pcs_log("not HTTP/1.1 protocol, %s\n", line);
+         return 0;
+     }
+     ptr += 8;
+
+     /* 忽略空格 */
+     while (ptr < end && *ptr == ' ') ptr++;
+     if (ptr >= end) return 0;
+
+     start = ptr;
+
+     /* 找HTTP状态码 */
+     while (ptr < end && *ptr != ' ') ptr++;     
+     if (ptr >= end) return 0;
+
+     if (ptr == start) {
+         /* 没有找到任何状态码 */
+         return 0;
+     }
+
+     *ptr = '\0';
+     ptr++;
+
+     /* 转换状态码 */
+     http_code = atoi(start);
+
+     if (http_code < 200 || http_code >= 300) {
+         /* 服务器返回出错了，为了得到服务器返回的数据，还是要让curl继续收数据，然后在write callback中处理错误 */
+         pcs_log("server response error, http code %d\n", http_code);
+         subtask->status = TASK_STATUS_REMOTE_ERROR;         
+     } else {
+         subtask->status = TASK_STATUS_DOWNLOADING;
+     }
+
+     subtask->http_code = http_code;
+
+     pcs_log("http code is %d\n", http_code);
+
+    return recv_size;
+}
+
 static size_t task_file_write_callback(char *buffer, size_t size, size_t nmemb, void *userp)
 {
     //pcs_log("task_file_write_callback called, buffer %p, size = %u, nmemb = %u\n", buffer, (unsigned int)size, (unsigned int)nmemb);
@@ -272,14 +346,25 @@ static size_t task_file_write_callback(char *buffer, size_t size, size_t nmemb, 
     int err = 0;
     ssize_t ret;
     task_sub_t *subtask = (task_sub_t *)userp;
+    
+    assert(subtask != NULL);
+
     task_t *task = subtask->task;
     
-    assert(task != NULL);
+    assert(task != NULL);    
 
     task_file_t *file = task->file;
     task_file_slice_t *slice = subtask->file_slice;
 
     size_t recv_size = size * nmemb;
+
+    if (subtask->status != TASK_STATUS_DOWNLOADING) {
+        char err_msg[1024];
+        memset(err_msg, 0, sizeof(err_msg));
+        strncpy(err_msg, buffer, (recv_size < sizeof(err_msg) - 2 ? recv_size : sizeof(err_msg) - 2));
+        pcs_log("server response error message is : %s\n", err_msg);
+        return 0;
+    }
 
     subtask->download_size += recv_size;
     
@@ -404,9 +489,13 @@ static int task_init_curl(task_t *task)
         
         curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 
+        curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, task_head_recv_callback);
+        curl_easy_setopt(curl, CURLOPT_HEADERDATA, task->subtask + i);
+        
+        curl_easy_setopt(curl, CURLOPT_HEADER, 0L);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, task_file_write_callback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, task->subtask + i);
-        curl_easy_setopt(curl, CURLOPT_HEADER, 0L);
+        
         curl_easy_setopt(curl, CURLOPT_URL, task->url);
         //curl_easy_setopt(curl, CURLOPT_PRIVATE, NULL);
                         
@@ -459,6 +548,8 @@ static int task_init(task_t *task)
     int subtask_cnt = 0;
 
     pcs_log("init task\n");
+
+    task->tpid = syscall(SYS_gettid);
 
     /* get the subtask count */   
     subtask_cnt = task_subtask_slice(task);
@@ -516,17 +607,18 @@ init_failed:
 }
 
 
-static int task_exit(task_t *task)
+static void task_summary_show(task_t *task)
 {
-    pcs_log("task exit\n");
-
     char time_str[128];
 
     unsigned int speed = task->download_size / task->download_ts;
 
+    printf("\ntask summary:\n");
+    printf("pthread pid      : %u\n", task->tpid);
     printf("file name        : %s\n", task->lpath);
     printf("total size       : %llu\n", (unsigned long long)(task->total_size));
     printf("download size    : %llu\n", (unsigned long long)(task->download_size));
+    printf("server file md5  : %s\n", task->rmd5);
     printf("start time       : %s", ctime_r(&(task->start_ts), time_str));
     printf("stop time        : %s", ctime_r(&(task->complete_ts), time_str));
     printf("download time    : %u\n", (unsigned int)(task->download_ts));
@@ -534,14 +626,121 @@ static int task_exit(task_t *task)
         speed, ((double)speed) / 1024, ((double)speed) / (1024 * 1024));
 
     int i;
-    printf("\n%4s %16s\n", "task", "download size");
-    printf("---- ----------------\n");
+    printf("\n%4s  %16s\n", "task", "download size");
+    printf("----  ----------------\n");
     for (i = 0; i < task->subtask_cnt; i++) {
-        printf("%4d %16llu\n", i, (unsigned long long)(task->subtask[i].download_size));
+        printf("%4d  %16llu\n", i, (unsigned long long)(task->subtask[i].download_size));
     }
-    printf("---- ----------------\n");
+    printf("----  ----------------\n");    
+}
+
+
+static int task_exit(task_t *task)
+{
+    pcs_log("task exit\n");
+
+    if (!task) {
+        return -1;
+    }
+
+    task_summary_show(task);    
+
+    if (task->url) {
+        pcs_free(task->url);
+        task->url = NULL;
+    }
+
+    if (task->rpath) {
+        pcs_free(task->rpath);
+        task->rpath = NULL;
+    }
+
+    if (task->lpath) {
+        pcs_free(task->lpath);
+        task->lpath = NULL;
+    }
+
+    if (task->rmd5) {
+        pcs_free(task->rmd5);
+        task->rmd5 = NULL;
+    }
+
+    if (task->rcid) {
+        pcs_free(task->rcid);
+        task->rcid = NULL;
+    }
+
+    if (task->file) {
+        if (task->file->slices) {
+            pcs_free(task->file->slices);
+            task->file->slices = NULL;
+        }
+        pcs_free(task->file);
+        task->file = NULL;
+    }
+
+    if (task->subtask) {
+        int i = 0;
+        for (i = 0; i < task->subtask_cnt; i++) {
+            if (task->subtask[i].curl) {
+                if (task->cm) {
+                    curl_multi_remove_handle(task->cm, task->subtask[i].curl);
+                }
+                curl_easy_setopt(task->subtask[i].curl, CURLOPT_COOKIELIST, "ALL"); //清除下载子任务的cookie，以免多线程写cookie文件
+                curl_easy_cleanup(task->subtask[i].curl);
+                task->subtask[i].curl = NULL;
+            }
+        }
+        pcs_free(task->subtask);
+        task->subtask = NULL;
+    }
+
+    if (task->cm) {
+        curl_multi_cleanup(task->cm);
+        task->cm = NULL;
+    }
+
+    if (task->buffer) {
+        pcs_free(task->buffer);
+        task->buffer = NULL;
+    }
+
+    TASK_LOCK_SURE();
+
+    task->prev->next = task->next;
+    task->next->prev = task->prev;
+
+    g_task_list->run_cnt--;
+
+    TASK_UNLOCK_SURE();
 
     return 0;
+}
+
+static void task_result_check(task_t *task)
+{
+#if 0    
+    struct CURLMsg *m = NULL;
+    CURL *e = NULL;
+    int msgq = 0;
+    int i = 0;
+
+    do {        
+        m = curl_multi_info_read(task->cm, &msgq);
+        if(m && (m->msg == CURLMSG_DONE)) {
+            e = m->easy_handle;
+            
+            for (i = 0; i < task->subtask_cnt; i++) {
+                if (e == task->subtask[i].curl) {
+                    /* get curl info, see https://curl.haxx.se/libcurl/c/curl_easy_getinfo.html */              
+                    //curl_easy_getinfo(e, CURLINFO_XXX, );
+                    break;
+                }
+            }
+
+        }
+    } while(m);
+#endif
 }
 
 static int task_loop(task_t *task)
@@ -622,6 +821,8 @@ static int task_loop(task_t *task)
 
     task->download_ts += (ts_2 - ts_1);
     
+    task_result_check(task);
+
     return 0;
 }
 
@@ -629,7 +830,6 @@ static int task_loop(task_t *task)
 static void *task_thread(void *param)
 {
     task_t *task = (task_t *)param;
-    struct HttpContext *context = (struct HttpContext *)(task->http_context);
     int ret = 0;
 
     printf("task thread running: rpath = %s, lpath = %s\n", task->rpath, task->lpath);
@@ -681,7 +881,6 @@ static int task_thread_start(task_t *task)
 int task_add(void *context, char *rpath, char *rmd5, 
     uint64_t total_size, char *lpath)
 {
-    int ret = 0;
 
     printf("%s %d %s : add task rpath %s, rmd5 %s, size %llu, lpath %s\n", __FILE__, __LINE__, __FUNCTION__,
         rpath, rmd5, (unsigned long long)total_size, lpath);
@@ -690,7 +889,6 @@ int task_add(void *context, char *rpath, char *rmd5,
 
     /* look whether task exist ? */
     task_t *task = g_task_list->run.next;
-    task_t *task_next = NULL;
 
     while (task != &(g_task_list->run)) {
         if (strcmp(task->lpath, lpath) == 0 ||
@@ -730,9 +928,7 @@ int task_add(void *context, char *rpath, char *rmd5,
     TASK_UNLOCK_SURE();
 
     /* start a thread to download */
-    task_thread_start(task);
-
-    return 0;
+    return task_thread_start(task);
 }
 
 
@@ -756,7 +952,7 @@ int task_del()
  */
 int task_pause()
 {
-
+  
      return 0;
 }
 

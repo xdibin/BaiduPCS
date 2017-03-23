@@ -5,16 +5,26 @@
 #include <locale.h>
 #include <time.h>
 
+#include <signal.h>
+
 #include "cJSON.h"
 #include "utils.h"
 
 #include "http.h"
 #include "dispatch.h"
 #include "pcs_log.h"
+#include "task.h"
+
+/** 整个进程是否运行的标志，运行:1，收到退出信号置为0 */
+volatile int g_pcs_running = 1;
 
 
-
-
+static void signal_handle(int signo)
+{
+	if (signo == SIGINT || signo == SIGTERM) {
+		g_pcs_running = 0;
+	}
+}
 
 
 
@@ -103,7 +113,7 @@ static void save_http_context(HttpContext *context)
 	filename = context->contextfile;
 	pf = fopen(filename, "wb");
 	if (!pf) {
-		fprintf(stderr, "Error: Can't open the file: %s\n", filename);
+		pcs_log("Error: Can't open the file: %s\n", filename);
 		pcs_free(json);
 		return;
 	}
@@ -143,13 +153,13 @@ static int restore_http_context(HttpContext *context, const char *filename)
 	pcs_log("context file is %s\n", context->contextfile);
 	filesize = read_file(context->contextfile, &filecontent);
 	if (filesize <= 0) {
-		fprintf(stderr, "Error: Can't read the context file (%s).\n", context->contextfile);
+		pcs_log("Error: Can't read the context file (%s).\n", context->contextfile);
 		if (filecontent) pcs_free(filecontent);
 		return -1;
 	}
 	root = cJSON_Parse(filecontent);
 	if (!root) {
-		fprintf(stderr, "Error: Broken context file (%s).\n", context->contextfile);
+		pcs_log("Error: Broken context file (%s).\n", context->contextfile);
 		pcs_free(filecontent);
 		return -1;
 	}
@@ -157,7 +167,7 @@ static int restore_http_context(HttpContext *context, const char *filename)
 	item = cJSON_GetObjectItem(root, "cookiefile");
 	if (item && item->valuestring && item->valuestring[0]) {
 		if (!is_absolute_path(item->valuestring)) {
-			printf("warning: Invalid context.cookiefile, the value should be absolute path, use default value: %s.\n", context->cookiefile);
+			pcs_log("warning: Invalid context.cookiefile, the value should be absolute path, use default value: %s.\n", context->cookiefile);
 		}
 		else {
 			if (context->cookiefile) pcs_free(context->cookiefile);
@@ -169,7 +179,7 @@ static int restore_http_context(HttpContext *context, const char *filename)
 	item = cJSON_GetObjectItem(root, "captchafile");
 	if (item && item->valuestring && item->valuestring[0]) {
 		if (!is_absolute_path(item->valuestring)) {
-			printf("warning: Invalid context.captchafile, the value should be absolute path, use default value: %s.\n", context->captchafile);
+			pcs_log("warning: Invalid context.captchafile, the value should be absolute path, use default value: %s.\n", context->captchafile);
 		}
 		else {
 			if (context->captchafile) pcs_free(context->captchafile);
@@ -180,7 +190,7 @@ static int restore_http_context(HttpContext *context, const char *filename)
 	item = cJSON_GetObjectItem(root, "workdir");
 	if (item && item->valuestring && item->valuestring[0]) {
 		if (item->valuestring[0] != '/') {
-			printf("warning: Invalid context.workdir, the value should be absolute path, use default value: %s.\n", context->workdir);
+			pcs_log("warning: Invalid context.workdir, the value should be absolute path, use default value: %s.\n", context->workdir);
 		}
 		else {
 			if (context->workdir) pcs_free(context->workdir);
@@ -191,7 +201,7 @@ static int restore_http_context(HttpContext *context, const char *filename)
 	item = cJSON_GetObjectItem(root, "list_page_size");
 	if (item) {
 		if (((int)item->valueint) < 1) {
-			printf("warning: Invalid context.list_page_size, the value should be great than 0, use default value: %d.\n", context->list_page_size);
+			pcs_log("warning: Invalid context.list_page_size, the value should be great than 0, use default value: %d.\n", context->list_page_size);
 		}
 		else {
 			context->list_page_size = (int)item->valueint;
@@ -201,7 +211,7 @@ static int restore_http_context(HttpContext *context, const char *filename)
 	item = cJSON_GetObjectItem(root, "list_sort_name");
 	if (item && item->valuestring && item->valuestring[0]) {
 		if (strcmp(item->valuestring, "name") && strcmp(item->valuestring, "time") && strcmp(item->valuestring, "size")) {
-			printf("warning: Invalid context.list_sort_name, the value should be one of [name|time|size], use default value: %s.\n", context->list_sort_name);
+			pcs_log("warning: Invalid context.list_sort_name, the value should be one of [name|time|size], use default value: %s.\n", context->list_sort_name);
 		}
 		else {
 			if (context->list_sort_name) pcs_free(context->list_sort_name);
@@ -212,7 +222,7 @@ static int restore_http_context(HttpContext *context, const char *filename)
 	item = cJSON_GetObjectItem(root, "list_sort_direction");
 	if (item && item->valuestring && item->valuestring[0]) {
 		if (strcmp(item->valuestring, "asc") && strcmp(item->valuestring, "desc")) {
-			printf("warning: Invalid context.list_sort_direction, the value should be one of [asc|desc], use default value: %s.\n", context->list_sort_direction);
+			pcs_log("warning: Invalid context.list_sort_direction, the value should be one of [asc|desc], use default value: %s.\n", context->list_sort_direction);
 		}
 		else {
 			if (context->list_sort_direction) pcs_free(context->list_sort_direction);
@@ -223,7 +233,7 @@ static int restore_http_context(HttpContext *context, const char *filename)
 	item = cJSON_GetObjectItem(root, "secure_method");
 	if (item && item->valuestring && item->valuestring[0]) {
 		if (strcmp(item->valuestring, "plaintext") && strcmp(item->valuestring, "aes-cbc-128") && strcmp(item->valuestring, "aes-cbc-192") && strcmp(item->valuestring, "aes-cbc-256")) {
-			printf("warning: Invalid context.secure_method, the value should be one of [plaintext|aes-cbc-128|aes-cbc-192|aes-cbc-256], use default value: %s.\n", context->secure_method);
+			pcs_log("warning: Invalid context.secure_method, the value should be one of [plaintext|aes-cbc-128|aes-cbc-192|aes-cbc-256], use default value: %s.\n", context->secure_method);
 		}
 		else {
 			if (context->secure_method) pcs_free(context->secure_method);
@@ -250,7 +260,7 @@ static int restore_http_context(HttpContext *context, const char *filename)
 	item = cJSON_GetObjectItem(root, "max_thread");
 	if (item) {
 		if (((int)item->valueint) < 1) {
-			printf("warning: Invalid context.max_thread, the value should be great than 0, use default value: %d.\n", context->max_thread);
+			pcs_log("warning: Invalid context.max_thread, the value should be great than 0, use default value: %d.\n", context->max_thread);
 		}
 		else {
 			context->max_thread = (int)item->valueint;
@@ -260,7 +270,7 @@ static int restore_http_context(HttpContext *context, const char *filename)
 	item = cJSON_GetObjectItem(root, "max_speed_per_thread");
 	if (item) {
 		if (((int)item->valueint) < 0) {
-			printf("warning: Invalid context.max_speed_per_thread, the value should be >= 0, use default value: %d.\n", context->max_speed_per_thread);
+			pcs_log("warning: Invalid context.max_speed_per_thread, the value should be >= 0, use default value: %d.\n", context->max_speed_per_thread);
 		}
 		else {
 			context->max_speed_per_thread = (int)item->valueint;
@@ -270,7 +280,7 @@ static int restore_http_context(HttpContext *context, const char *filename)
 	item = cJSON_GetObjectItem(root, "max_upload_speed_per_thread");
 	if (item) {
 		if (((int)item->valueint) < 0) {
-			printf("warning: Invalid context.max_upload_speed_per_thread, the value should be >= 0, use default value: %d.\n", context->max_upload_speed_per_thread);
+			pcs_log("warning: Invalid context.max_upload_speed_per_thread, the value should be >= 0, use default value: %d.\n", context->max_upload_speed_per_thread);
 		}
 		else {
 			context->max_upload_speed_per_thread = (int)item->valueint;
@@ -313,6 +323,8 @@ static void init_http_context(HttpContext *context)
 	context->file_slice_size_min = FILE_SLICE_MIN;
 
 	context->user_agent = pcs_utils_strdup(USAGE);
+
+	context->sig_handle = signal_handle;
 }
 
 /*释放上下文*/
@@ -383,14 +395,16 @@ int main(int argc, char *argv[])
 
 	srandom((unsigned int)(time(NULL)));
 
+	signal(SIGINT, signal_handle);
+	signal(SIGTERM, signal_handle);
+	signal(SIGPIPE, SIG_IGN);
+
 	/* Must initialize libcurl before any threads are started */ 
 	curl_global_init(CURL_GLOBAL_ALL);
 
 	hook_cjson();
 	
 	init_http_context(&context);
-
-	task_list_init();
 
 	pcs_log("restore http context\n");
 	rc = restore_http_context(&context, NULL);
@@ -404,22 +418,21 @@ int main(int argc, char *argv[])
 	pcs_log("create pcs\n");
 	context.pcs = create_http_pcs(&context);
 	if (!context.pcs) {
-		rc = -1;
 		pcs_log("Can't create pcs context.\n");
-		goto exit_main;
+		return -1;
 	}
 	
-	pcs_log("waiting http request ...\n");
-
+	task_list_init();
+	
 	http_loop(&context);
 
 	pcs_log("pcs exiting\n");	
 
-	destroy_http_pcs(context.pcs);
-	save_http_context(&context);
-
-exit_main:
 	task_list_exit();
+
+	destroy_http_pcs(context.pcs);
+
+	save_http_context(&context);
 
 	free_http_context(&context);
 
@@ -429,7 +442,7 @@ exit_main:
 
 	pcs_log("pcs exited\n");
 
-	return rc;
+	return 0;
 }
 
 

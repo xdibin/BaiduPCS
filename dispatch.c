@@ -871,7 +871,7 @@ static xhttpd_t *http_int_by_xhttpd(HttpContext *context)
 }
 
 
-static void http_exit_by_xhttpd(xhttpd_t *xhttp)
+static void http_break_by_xhttpd(xhttpd_t *xhttp)
 {
 	xhttpd_exit(xhttp);
 }
@@ -899,6 +899,8 @@ static int http_response_by_xhttpd(HttpContext *http, const char *body, int body
 	}
 }
 
+static xhttpd_t *g_xhttpd = NULL;
+
 /**
  * @brief HTTP主循环
  *
@@ -916,12 +918,24 @@ int http_loop(HttpContext *context)
 		return -1;
 	}
 
+	g_xhttpd = xhttpd;
+
 	pcs_log("xhttpd looping ...\n");
 	xhttpd_loop(xhttpd);
-
-	http_exit_by_xhttpd(xhttpd);
-	xhttpd = NULL;
+	pcs_log("xhttpd exiting ...\n");
+	free(xhttpd);
+	g_xhttpd = NULL;
 
 	return 0;
 }
 
+/**
+ * 退出HTTP循环
+ */
+int http_break()
+{
+	if (g_xhttpd) {
+		fprintf(stderr, "break the http loop\n");
+		http_break_by_xhttpd(g_xhttpd);		
+	}
+}
