@@ -313,12 +313,12 @@ static int json_list_file_add(char **json, int *capacity, int *remain, PcsFileIn
 		"\"isdir\":%d,"
 		"\"md5\":\"%s\""
 		"},",
-		fi->fs_id,
+		(unsigned long long)fi->fs_id,
 		json_encode_string(fi->path, path, &path_len),
 		json_encode_string(fi->server_filename, filename, &filename_len),
-		fi->size,
-		fi->server_mtime,
-		fi->server_ctime,
+		(unsigned long long)fi->size,
+		(unsigned long long)fi->server_mtime,
+		(unsigned long long)fi->server_ctime,
 		fi->isdir,
 		(fi->md5 ? fi->md5 : "")	
 	);
@@ -474,12 +474,12 @@ static int callback_meta(HttpContext *context)
 		"\"isdir\":%d,"
 		"\"md5\":\"%s\""
 		"}]}",
-		fi->fs_id,
+		(unsigned long long)fi->fs_id,
 		json_encode_string(fi->path, jpath, &jpath_len),
 		json_encode_string(fi->server_filename, filename, &filename_len),
-		fi->size,
-		fi->server_mtime,
-		fi->server_ctime,
+		(unsigned long long)fi->size,
+		(unsigned long long)fi->server_mtime,
+		(unsigned long long)fi->server_ctime,
 		fi->isdir,
 		(fi->md5 ? fi->md5 : "")	
 	);
@@ -516,7 +516,7 @@ static int callback_quota(HttpContext *context)
 
 	memset(buf, 0, sizeof(buf));
 	len = snprintf(buf, sizeof(buf), "{\"errno\":0,\"total\":%lld,\"used\":%lld}",
-		quota, used);
+		(unsigned long long)quota, (unsigned long long)used);
 
 	pcs_log("response is '%s', len = %d\n", buf, len);
 
@@ -861,7 +861,8 @@ static xhttpd_t *http_int_by_xhttpd(HttpContext *context)
 
 	rc = xhttpd_init(&xhttpd, context, 
 		http_callback_by_xhttpd,
-		(struct sockaddr *)&addr, sizeof(addr));
+		(struct sockaddr *)&addr, sizeof(addr),
+		context->sig_handle);
 	if (rc != 0) {
 		pcs_log("init xhttpd server failed\n");
 		return NULL;
@@ -897,6 +898,8 @@ static int http_response_by_xhttpd(HttpContext *http, const char *body, int body
 	if (body || bodylen > 0) {
 		send(socket, body, bodylen, MSG_NOSIGNAL);
 	}
+
+	return 0;
 }
 
 static xhttpd_t *g_xhttpd = NULL;
@@ -938,4 +941,6 @@ int http_break()
 		fprintf(stderr, "break the http loop\n");
 		http_break_by_xhttpd(g_xhttpd);		
 	}
+
+	return 0;
 }

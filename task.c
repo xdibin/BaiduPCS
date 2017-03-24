@@ -15,6 +15,7 @@
 
 #include <syscall.h> //for syscall(SYS_gettid)
 
+#include <arpa/inet.h>
 #include <curl/curl.h>
 #include <curl/multi.h>
 
@@ -47,6 +48,22 @@ static task_list_t *g_task_list = NULL;
             return ERRCODE_SYSTEM; \
         } \
     } while(0)
+
+
+static int task_cfg_restore(task_t *task);
+
+static uint64_t htonll(uint64_t h)
+{
+    uint64_t u64 = htonl(h & 0xffffffff);
+
+    return (u64 << 32) | (htonl(h >> 32) & 0xffffffff);
+}
+
+static uint32_t ntohll(uint64_t n)
+{
+    return htonll(n);
+}
+
 
 
 
@@ -97,6 +114,40 @@ int task_list_exit()
 {
     //TODO: 
     pcs_log("task list exit ...\n");
+
+    task_list_t *list = g_task_list;
+    task_t *task = NULL;
+    task_t *task_next = NULL;
+
+    if (!list) {
+        return 0;
+    }
+
+    TASK_LOCK_SURE();
+
+    task = list->run.next;
+    while (task != &(list->run)) {
+        task_next = task->next;
+
+        pcs_log("signal to stop task, id %d\n", task->task_id);
+        task->status = TASK_STATUS_STOP;
+        task = task_next;
+    }
+
+    TASK_UNLOCK_SURE();
+
+    /* wait all tasks to stop */
+    while (list->run_cnt > 0) {
+        usleep(10);
+    }
+
+    pthread_mutex_destroy((pthread_mutex_t *)(list->mutex));
+
+    pcs_free(list->mutex);
+
+    pcs_free(list);
+
+    g_task_list = NULL;
 
      return 0;
 }
@@ -276,6 +327,11 @@ static size_t task_head_recv_callback(char *buffer, size_t size, size_t nmemb, v
 
     assert(subtask != NULL);
 
+    if (subtask->task->status == TASK_STATUS_STOP) {
+        pcs_log("task is stopping\n");
+        return 0;
+    }
+
     if (subtask->status == TASK_STATUS_DOWNLOADING) {
         return recv_size;
     }
@@ -357,6 +413,11 @@ static size_t task_file_write_callback(char *buffer, size_t size, size_t nmemb, 
     task_file_slice_t *slice = subtask->file_slice;
 
     size_t recv_size = size * nmemb;
+
+    if (subtask->task->status == TASK_STATUS_STOP) {
+        pcs_log("task is stopping\n");
+        return 0;
+    }
 
     if (subtask->status != TASK_STATUS_DOWNLOADING) {
         char err_msg[1024];
@@ -478,7 +539,7 @@ static int task_init_curl(task_t *task)
     offset = 0;
     for (i = 0; i < subtask_cnt; i++) {
         task->subtask[i].task = task;
-        task->subtask[i].task_id = i;
+        task->subtask[i].subtask_id = i;
         task->subtask[i].file_slice = task->file->slices + i;
 
         curl = curl_easy_init();
@@ -486,8 +547,10 @@ static int task_init_curl(task_t *task)
             pcs_log("init curl %d failed\n", i);
             return -1;
         }
-        
+
+#if defined(DEBUG) || defined(_DEBUG)        
         curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+#endif
 
         curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, task_head_recv_callback);
         curl_easy_setopt(curl, CURLOPT_HEADERDATA, task->subtask + i);
@@ -549,19 +612,23 @@ static int task_init(task_t *task)
 
     pcs_log("init task\n");
 
-    task->tpid = syscall(SYS_gettid);
+    task->tpid = (unsigned int)syscall(SYS_gettid);
 
-    /* get the subtask count */   
-    subtask_cnt = task_subtask_slice(task);
-    
-    if (task_init_memory(task) != 0) {
-        ret = ERRCODE_MEMORY;
-        goto init_failed;
+    pcs_log("task id %d, pid %u, tid = %llu\n", task->task_id, task->tpid, (unsigned long long)task->tid);
+
+    if ((subtask_cnt = task_cfg_restore(task)) == -1) {
+        /* get the subtask count */   
+        subtask_cnt = task_subtask_slice(task);
+
+        if (task_init_memory(task) != 0) {
+            ret = ERRCODE_MEMORY;
+            goto init_failed;
+        }
+
+        if ((ret = task_init_file(task)) != 0) {
+            goto init_failed;
+        }         
     }
-
-    if ((ret = task_init_file(task)) != 0) {
-        goto init_failed;
-    }    
 
     if ((ret = task_init_curl(task)) != 0) {
         goto init_failed;
@@ -643,6 +710,12 @@ static int task_exit(task_t *task)
         return -1;
     }
 
+    if (task->file && task->file->fd > 0) {
+        fsync(task->file->fd);
+        close(task->file->fd);
+        task->file->fd = -1;
+    }
+
     task_summary_show(task);    
 
     if (task->url) {
@@ -675,6 +748,9 @@ static int task_exit(task_t *task)
             pcs_free(task->file->slices);
             task->file->slices = NULL;
         }
+        fsync(task->file->fd);
+        close(task->file->fd);
+        task->file->fd = -1;        
         pcs_free(task->file);
         task->file = NULL;
     }
@@ -705,6 +781,16 @@ static int task_exit(task_t *task)
         task->buffer = NULL;
     }
 
+    if (task->tid) {
+        pcs_free(task->tid);
+        task->tid = NULL;
+    }
+
+    if (task->cfg_name) {
+        pcs_free(task->cfg_name);
+        task->cfg_name = NULL;
+    }    
+
     TASK_LOCK_SURE();
 
     task->prev->next = task->next;
@@ -713,6 +799,8 @@ static int task_exit(task_t *task)
     g_task_list->run_cnt--;
 
     TASK_UNLOCK_SURE();
+
+    pcs_free(task);
 
     return 0;
 }
@@ -743,6 +831,278 @@ static void task_result_check(task_t *task)
 #endif
 }
 
+
+
+
+
+static int task_cfg_create(task_t *task)
+{
+    int fd;
+    task_cfg_head_t head;
+    int err;
+
+    pcs_log("try to create a cfg, %s\n", task->cfg_name);
+
+    if ((fd = open(task->cfg_name, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR)) == -1) {
+        err = errno;
+        pcs_log("open file failed, %s %s\n", task->cfg_name, strerror(err));
+        return -1;
+    }
+
+    if (lseek(fd, SLICE_TABLE_START, SEEK_SET) == -1) {
+        err = errno;
+        close(fd);
+        pcs_log("lseek file failed, %s %s\n", task->cfg_name, strerror(err));
+        return -1;
+    }
+
+    int i;
+    task_file_slice_t slice;
+    for (i = 0; i < task->subtask_cnt; i++) {
+        memset(&slice, 0, sizeof(task_file_slice_t));
+        slice.offset_base = htonll(task->file->slices[i].offset_base);
+        slice.slice_size = htonll(task->file->slices[i].slice_size);
+        slice.offset_current = htonll(task->file->slices[i].offset_current);
+
+        pcs_log("subtask %d, start from %llx, total size 0x%llx, offset current size 0x%llx\n",
+            i,
+            (unsigned long long)task->file->slices[i].offset_base,
+            (unsigned long long)task->file->slices[i].slice_size,
+            (unsigned long long)task->file->slices[i].offset_current);
+
+        if (write(fd, &slice, sizeof(task_file_slice_t)) == -1) {
+            err = errno;
+            pcs_log("write file failed, %s %s\n", task->cfg_name, strerror(err));
+            close(fd);
+            return -1;            
+        }
+    }
+
+    //现在写入头信息，这样保证后面的信息是对的，如果只写了后面的，还没来得及写读就程序异常退出了，那么下次启动的时候能检查到头是不完整的
+    memset(&head, 0, sizeof(task_cfg_head_t));
+
+    memcpy(head.magic, "XPCS", 4);
+
+    head.version = 1;
+    head.slice_cnt = task->subtask_cnt & 0xff;
+    head.slice_table_start = htons(SLICE_TABLE_START);
+
+    if (lseek(fd, 0, SEEK_SET) == -1) {
+        err = errno;
+        close(fd);
+        pcs_log("lseek file failed, %s %s\n", task->cfg_name, strerror(err));
+        return -1;
+    }
+
+    if (write(fd, &head, sizeof(task_cfg_head_t)) == -1) {
+        err = errno;
+        pcs_log("write file failed, %s %s\n", task->cfg_name, strerror(err));
+        close(fd);
+        return -1;
+    }
+
+    fsync(fd);
+
+    close(fd);
+
+    pcs_log("create cfg success %s\n", task->cfg_name);
+
+    return 0;
+}
+
+static int task_cfg_flush(task_t *task)
+{
+    pcs_log("try to flush cfg\n");
+
+    int err;
+    int fd = -1;    
+
+    if ((fd = open(task->cfg_name, O_RDWR)) == -1) {
+        err = errno;
+        if (err == ENOENT) {
+            //新建一个CFG文件
+            return task_cfg_create(task);
+        } else {
+            pcs_log("open file failed, %s %s\n", task->cfg_name, strerror(err));
+            return -1;
+        }
+    }
+
+    if (lseek(fd, SLICE_TABLE_START, SEEK_SET) == -1) {
+        err = errno;
+        close(fd);
+        pcs_log("lseek file failed, %s %s\n", task->cfg_name, strerror(err));
+        return -1;
+    }
+
+    
+    /* 开始分片信息，一片一片的写，即使出错，也只会出错一片而已
+     */    
+    int i;
+    uint64_t curr = 0;
+    for (i = 0; i < task->subtask_cnt; i++) {
+        curr = htonll(task->file->slices[i].offset_current);
+
+        //跳过 slice.offset_base 和 slice.slice_size 这两个字段(16字节)，因为这两个字段是不会变的
+        if (lseek(fd, 16, SEEK_CUR) == -1) {
+            err = errno;
+            close(fd);
+            pcs_log("lseek file failed, %s %s\n", task->cfg_name, strerror(err));
+            return -1;
+        }
+
+        pcs_log("flush subtask %d offset_current 0x%llx\n", i, (unsigned long long)task->file->slices[i].offset_current);
+
+        if (write(fd, &curr, sizeof(task_file_slice_t)) == -1) {
+            err = errno;
+            pcs_log("write file failed, %s %s\n", task->cfg_name, strerror(err));
+            close(fd);
+            return -1;            
+        }
+
+        fsync(fd);
+    }
+
+    fsync(fd);
+
+    close(fd);
+
+    return 0;
+}
+
+
+/**
+ * 尝试从cfg文件恢复下载进度，如果cfg文件是OK的，则该函数会直接初始化subtask，内存，文件分片等
+ * 如果CFG文件不OK，那么必须走默认流程来初始化task
+ *
+ * 成功返回子任务个数，失败返回-1 
+ */
+static int task_cfg_restore(task_t *task)
+{
+    int fd;
+    task_cfg_head_t head;
+    int err;
+
+    char filename[4096];
+
+    char *ptr;
+
+    pcs_log("try to restore task progress from cfg\n");
+
+    memset(filename, 0, sizeof(filename));
+
+    ptr = strrchr(task->lpath, '/');
+
+    assert(ptr != NULL);
+
+    ptr++;
+    
+    memcpy(filename, task->lpath, ptr - task->lpath);
+
+    pcs_log("filename is %s\n", filename);
+
+    int len = strlen(filename);
+
+    snprintf(filename + len, sizeof(filename) - len, ".%s.cfg", ptr);
+
+    task->cfg_name = pcs_utils_strdup(filename);
+
+    pcs_log("cfg filename is %s\n", filename);
+
+    struct stat st;
+    if (stat(task->cfg_name, &st) == -1) {
+        err = errno;
+        pcs_log("stat file failed, %s %s\n", task->cfg_name, strerror(err));
+        return -1;        
+    }
+
+    if (st.st_size < sizeof(task_cfg_head_t)) {
+        pcs_log("file size too small, %s, %d\n", task->cfg_name, (int)st.st_size);
+        return -1;
+    }
+
+    if ((fd = open(task->cfg_name, O_RDONLY)) == -1) {
+        err = errno;
+        pcs_log("open file failed, %s %s\n", task->cfg_name, strerror(err));
+        return -1;
+    }
+
+    //读取文件头
+    memset(&head, 0, sizeof(task_cfg_head_t));
+    if (read(fd, &head, sizeof(task_cfg_head_t)) == -1) {
+        err = errno;
+        pcs_log("read file failed, %s %s\n", task->cfg_name, strerror(err));
+        close(fd);
+        return -1;
+    }
+
+    head.slice_table_start = ntohs(head.slice_table_start);
+
+    if (memcmp(head.magic, "XPCS", 4) != 0 ||
+        head.version != 1 ||
+        (head.slice_table_start != SLICE_TABLE_START)) {
+        pcs_log("head error, %s\n", task->cfg_name);
+        close(fd);
+        return -1;
+    }
+
+    if (lseek(fd, head.slice_table_start, SEEK_SET) == -1) {
+        err = errno;
+        pcs_log("lseek failed, %s %s\n", task->cfg_name, strerror(err));
+        close(fd);
+        return -1;        
+    }
+
+    //FIXME: 需要检查文件是否损坏或者不一致的情况
+
+    //检查文件大小
+    unsigned int size_expect = head.slice_table_start + (head.slice_cnt * sizeof(task_file_slice_t));
+    if (size_expect != st.st_size) {
+        pcs_log("cfg file size exepect is %u, but real size is %u\n", size_expect, (unsigned int)st.st_size);
+        close(fd);
+        return -1;
+    }
+
+
+    task->subtask_cnt = head.slice_cnt;
+
+    pcs_log("got subtask cnt %d\n", task->subtask_cnt);
+
+    if (task_init_memory(task) == -1) {
+        close(fd);
+        return -1;
+    }
+
+    task_file_slice_t slice;
+    int i;
+
+    for (i = 0; i < head.slice_cnt; i++) {
+        memset(&slice, 0, sizeof(task_file_slice_t));
+        if (read(fd, &slice, sizeof(task_file_slice_t)) == -1) {
+            err = errno;
+            pcs_log("lseek failed, %s %s\n", task->cfg_name, strerror(err));
+            close(fd);
+            return -1;        
+        }
+
+        task->file->slices[i].offset_base = ntohll(slice.offset_base);
+        task->file->slices[i].slice_size = ntohll(slice.slice_size);
+        task->file->slices[i].offset_current = ntohll(slice.offset_current);
+
+        pcs_log("subtask %d, offset_base 0x%llx, total size 0x%llu, offset_current 0x%llu\n",
+            i,
+            (unsigned long long)task->file->slices[i].offset_base,
+            (unsigned long long)task->file->slices[i].slice_size,
+            (unsigned long long)(task->file->slices[i].offset_current));
+    }
+
+    close(fd);
+
+    return task->subtask_cnt;
+}
+
+
+
 static int task_loop(task_t *task)
 {
     int still_running = 0;
@@ -760,12 +1120,18 @@ static int task_loop(task_t *task)
     time_t ts_1;
     time_t ts_2;
 
+    time_t ts_3;
+    time_t ts_4;
+
+    uint64_t dl_cnt = 0;
+
     time(&ts_1);
+    ts_3 = ts_1;
+    ts_4 = ts_1;
 
     pcs_log("task loop ...\n");
 
-    do {
-
+    do {        
         /* we start some action by calling perform right away */ 
         curl_multi_perform(task->cm, &still_running);
 
@@ -813,7 +1179,18 @@ static int task_loop(task_t *task)
             curl_multi_perform(task->cm, &still_running);
             break;
         }
-    } while (still_running);
+
+        /* check need to flush cfg info */
+        time(&ts_4);
+        if ((ts_4 - ts_3 > TASK_CFG_FLUSH_INTERVAL) && 
+            (task->download_size - dl_cnt > TASK_CFG_FLUSH_INCR)) {
+            //尝试刷新
+            fsync(task->file->fd);
+            task_cfg_flush(task);
+            ts_3 = ts_4;
+            dl_cnt = task->download_size;
+        }
+    } while (still_running && task->status != TASK_STATUS_STOP);
 
     time(&ts_2);
     
@@ -850,7 +1227,6 @@ static void *task_thread(void *param)
 
 static int task_thread_start(task_t *task)
 {
-    pthread_t tid;
     pthread_attr_t attr;
     int ret;
     
@@ -860,7 +1236,7 @@ static int task_thread_start(task_t *task)
         return ERRCODE_SYSTEM;
     }
 
-    ret = pthread_create(&tid, &attr, task_thread, task);
+    ret = pthread_create(task->tid, &attr, task_thread, task);
 
     pthread_attr_destroy(&attr);
 
@@ -909,6 +1285,14 @@ int task_add(void *context, char *rpath, char *rmd5,
     }
 
     memset(task, 0, sizeof(task_t));
+
+    task->tid = (pthread_t *)pcs_malloc(sizeof(pthread_t));
+    if (!task->tid) {
+        TASK_UNLOCK_SURE();
+        pcs_free(task);
+        return ERRCODE_MEMORY;        
+    }
+    memset(task->tid, 0, sizeof(pthread_t));
 
     task->lpath = pcs_utils_strdup(lpath);
     task->rpath = pcs_utils_strdup(rpath);

@@ -777,12 +777,22 @@ static void xhttpd_accept_callback(struct ev_loop *loop, ev_io *watcher, int rev
 static void
 sigint_cb (struct ev_loop *loop, ev_signal *w, int revents)
 {
-  ev_break (loop, EVBREAK_ALL);
+    xhttpd_t *xhttpd = ev_userdata(loop);
+
+    fprintf(stderr, "%s %d libev signal int calback\n", __FILE__, __LINE__);
+
+    if (xhttpd->sighandle_callback) {
+        fprintf(stderr, "call user defined signal handle\n");
+        xhttpd->sighandle_callback(SIGINT);
+    }
+
+    ev_break (loop, EVBREAK_ALL);  
 }
 
 int xhttpd_init(xhttpd_t **xhttp, void *user_data,
 	void (*get_requst_callback)(xhttpd_http_t *http),
-	const struct sockaddr *addr, int addr_len)
+	const struct sockaddr *addr, int addr_len,
+    void (*sighandle_callback)(int signo))
 {   
     int xhttpd_listen_socket = -1;
     
@@ -848,11 +858,12 @@ int xhttpd_init(xhttpd_t **xhttp, void *user_data,
 	
 	xhttp_new->user_data = user_data;
 
+    xhttp_new->sighandle_callback = sighandle_callback;
+
 	*xhttp = xhttp_new;
 
-    ev_signal signal_watcher;
-    ev_signal_init (&signal_watcher, sigint_cb, SIGINT);
-    ev_signal_start (loop, &signal_watcher);    
+    ev_signal_init (&(xhttp_new->sigint_watcher), sigint_cb, SIGINT);
+    ev_signal_start (loop, &(xhttp_new->sigint_watcher));    
     
 	return 0;
 }
@@ -878,8 +889,6 @@ int xhttpd_loop(xhttpd_t *xhttp)
 
 	xhttp->loop = NULL;
 	xhttp->watcher = NULL;
-
-	free(xhttp);
 
 	return 0;
 }

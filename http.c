@@ -21,6 +21,8 @@ volatile int g_pcs_running = 1;
 
 static void signal_handle(int signo)
 {
+	fprintf(stderr, "%s %d signal handle called, signal = %d\n", __FILE__, __LINE__, signo);
+
 	if (signo == SIGINT || signo == SIGTERM) {
 		g_pcs_running = 0;
 	}
@@ -339,6 +341,7 @@ static void free_http_context(HttpContext *context)
 	if (context->secure_key) pcs_free(context->secure_key);
 	if (context->contextfile) pcs_free(context->contextfile);
 	if (context->user_agent) pcs_free(context->user_agent);
+	if (context->gid) pcs_free(context->gid);
 	memset(context, 0, sizeof(HttpContext));
 }
 
@@ -384,6 +387,10 @@ static void hook_cjson()
 	cJSON_InitHooks(&hooks);
 }
 
+
+/**
+ * make -f Makefile.http clean; make -f Makefile.http ver=debug
+ */
 int main(int argc, char *argv[])
 {
 	HttpContext context;
@@ -395,7 +402,6 @@ int main(int argc, char *argv[])
 
 	srandom((unsigned int)(time(NULL)));
 
-	signal(SIGINT, signal_handle);
 	signal(SIGTERM, signal_handle);
 	signal(SIGPIPE, SIG_IGN);
 
@@ -426,7 +432,7 @@ int main(int argc, char *argv[])
 	
 	http_loop(&context);
 
-	pcs_log("pcs exiting\n");	
+	pcs_log("pcs exiting\n");
 
 	task_list_exit();
 

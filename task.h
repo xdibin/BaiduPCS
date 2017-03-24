@@ -6,15 +6,6 @@
 #include <curl/curl.h>
 #include <curl/multi.h>
 
-typedef enum task_status {
-    TASK_STATUS_NONE,
-    TASK_STATUS_INIT,
-    TASK_STATUS_DOWNLOADING,
-    TASK_STATUS_COMPLETE,
-    TASK_STATUS_REMOTE_ERROR,
-    TASK_STATUS_LOCAL_ERROR,
-    TASK_STATUS_NETWORK_ERROR,
-} task_status_t;
 
 
 #ifndef TASK_BUFFER_SIZE
@@ -26,6 +17,32 @@ typedef enum task_status {
 /* 缓冲块总个数，所以总共缓冲区大小为 (TASK_BUFFER_SIZE * TASK_BUFFER_CNT) Bytes */
 #define TASK_BUFFER_CNT     (16)
 #endif
+
+/* CFG文件的刷新时间间隔，单位秒 */
+#define TASK_CFG_FLUSH_INTERVAL     (10)
+/* CFG文件的刷新周期，下载的文件没增大这么多刷新，单位字节 */
+#define TASK_CFG_FLUSH_INCR         (1 << 20)
+
+
+typedef enum task_status {
+    TASK_STATUS_NONE,
+    TASK_STATUS_INIT,
+    TASK_STATUS_DOWNLOADING,
+    TASK_STATUS_COMPLETE,
+    TASK_STATUS_PAUSE,
+    TASK_STATUS_STOP,
+    TASK_STATUS_REMOTE_ERROR,
+    TASK_STATUS_LOCAL_ERROR,
+    TASK_STATUS_NETWORK_ERROR,    
+} task_status_t;
+
+
+enum task_subtask_type {
+    SUBTASK_TYPE_NONE = 0,          /**< 错误类型 */
+    SUBTASK_TYPE_ONE_LESS = 1,      /**< 有且仅有一片 */
+    SUBTASK_TYPE_MID_LESS = 2,      /**< 有1-max片，且每片都小于min size */
+    SUBTASK_TYPE_MAX_LARGE = 3     /**< 有max片，且每片都大于min size */
+};
 
 
 typedef struct task_buffer {
@@ -52,7 +69,7 @@ struct task;
 
 typedef struct task_sub {
     struct task *task;  /**< 回指向task的指针 */
-    int task_id;        /**< 任务ID */
+    unsigned int subtask_id;        /**< 任务ID */
     CURL *curl;         /**< CURL句柄 */
     task_file_slice_t *file_slice;   /**< 该HTTP子任务操作哪个文件分片 */
     uint64_t download_size;
@@ -61,12 +78,18 @@ typedef struct task_sub {
 } task_sub_t;
 
 
-enum task_subtask_type {
-    SUBTASK_TYPE_NONE = 0,          /**< 错误类型 */
-    SUBTASK_TYPE_ONE_LESS = 1,      /**< 有且仅有一片 */
-    SUBTASK_TYPE_MID_LESS = 2,      /**< 有1-max片，且每片都小于min size */
-    SUBTASK_TYPE_MAX_LARGE = 3     /**< 有max片，且每片都大于min size */
-};
+#define SLICE_TABLE_START       0x40
+
+
+struct task_cfg_head {
+    char magic[4];                      /**< 魔数，必须为 XPCS */
+    unsigned char version;              /**< 版本号，目前固定为 1 */
+    unsigned char slice_cnt;            /**< 文件分片个数 */
+    unsigned short slice_table_start;   /**< 文件分片表开始位置，分片结构为 task_file_slice_t 类型 */
+    unsigned char md5[16];              /**< cfg文件的MD5，计算范围：文件头+分片表 */
+} __attribute__((packed));
+
+typedef struct task_cfg_head task_cfg_head_t;
 
 typedef struct task {
     struct task *prev;      /**< 指向前一个任务 */
@@ -81,7 +104,7 @@ typedef struct task {
 
     uint64_t total_size;        /**< 文件总大小 */
     uint64_t download_size;     /**< 文件已下载大小 */
-    task_status_t status;       /**< 任务的当前状态 */
+    volatile task_status_t status;       /**< 任务的当前状态 */
 
     time_t start_ts;            /**< 任务开始时间 */
     time_t download_ts;         /**< 任务下载总时间 */
@@ -89,6 +112,7 @@ typedef struct task {
     time_t used_ts;             /**< 任务下载总用时 */
 
     unsigned int tpid;          /**< Linux thread pid */
+    void *tid;                  /**< pthread_t id */
 
     void *http_context;         /**< HttpContext上下文句柄 */
     
@@ -100,11 +124,13 @@ typedef struct task {
 
     int buffer_cnt;         /**< 任务使用的缓冲区块数 */
     task_buffer_t *buffer;  /**< 任务使用的缓冲区列表 */
+
+    char *cfg_name;
 } task_t;
 
 typedef struct task_list {
     task_t run;
-    int run_cnt;
+    volatile int run_cnt;
 
     task_t done;
     int done_cnt;

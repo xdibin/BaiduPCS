@@ -39,13 +39,11 @@ typedef enum
 } xhttpd_socket_type_t;
 
 
-#ifdef XHTTPD_TCP_SOCKET
 #include "ev.h"
 
 #define XHTTPD_LOOP_FORVER		0
 #define XHTTPD_LOOP_NOWAIT		EVRUN_NOWAIT 
 #define XHTTPD_LOOP_ONCE		EVRUN_ONCE
-#endif
 
 typedef struct xhttpd_parameter {
 	char *key;
@@ -81,6 +79,8 @@ typedef struct xhttpd_s {
 	void *loop;
 	void *watcher;
 	void *user_data;
+	ev_signal sigint_watcher;
+	void (*sighandle_callback)(int signo);
 	void (*get_requst_callback)(xhttpd_http_t *http);
 } xhttpd_t;
 
@@ -99,7 +99,8 @@ const char *xhttpd_parameter_get(xhttpd_http_t *http, const char *key);
 
 int xhttpd_init(xhttpd_t **xhttp, void *user_data,
 	void (*get_requst_callback)(xhttpd_http_t *http),
-	const struct sockaddr *addr, int addr_len);
+	const struct sockaddr *addr, int addr_len,
+	void (*sighandle_callback)(int signo));
 
 int xhttpd_loop(xhttpd_t *xhttp);
 
