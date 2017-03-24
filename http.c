@@ -428,7 +428,7 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 	
-	task_list_init();
+	task_list_init(&context);
 	
 	http_loop(&context);
 

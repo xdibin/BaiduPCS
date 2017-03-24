@@ -6,7 +6,7 @@
 #include <curl/curl.h>
 #include <curl/multi.h>
 
-
+#include "task_db.h"
 
 #ifndef TASK_BUFFER_SIZE
 /* 缓冲块的默认大小，单位：字节 */
@@ -81,6 +81,8 @@ typedef struct task_sub {
 #define SLICE_TABLE_START       0x40
 
 
+
+
 struct task_cfg_head {
     char magic[4];                      /**< 魔数，必须为 XPCS */
     unsigned char version;              /**< 版本号，目前固定为 1 */
@@ -109,7 +111,6 @@ typedef struct task {
     time_t start_ts;            /**< 任务开始时间 */
     time_t download_ts;         /**< 任务下载总时间 */
     time_t complete_ts;         /**< 任务完成时间 */
-    time_t used_ts;             /**< 任务下载总用时 */
 
     unsigned int tpid;          /**< Linux thread pid */
     void *tid;                  /**< pthread_t id */
@@ -125,7 +126,9 @@ typedef struct task {
     int buffer_cnt;         /**< 任务使用的缓冲区块数 */
     task_buffer_t *buffer;  /**< 任务使用的缓冲区列表 */
 
-    char *cfg_name;
+    char *cfg_name;         /**< 任务配置文件名 */
+    task_mnt_t *mnt;        /**< 任务所在的磁盘分区引用 */
+
 } task_t;
 
 typedef struct task_list {
@@ -134,19 +137,24 @@ typedef struct task_list {
 
     task_t done;
     int done_cnt;
+
+    void *http_context;
+    task_dev_t *dev;
     
     void *mutex;
 } task_list_t;
 
 
 
-int task_list_init();
+int task_list_init(void *http_context);
 
 int task_list_exit();
 
 int task_add(void *context, char *rpath, char *rmd5, 
     uint64_t total_size, char *lpath);
 
+int task_restore(void *context, unsigned int task_id, char *rpath, char *rmd5, 
+    uint64_t total_size, char *lpath, task_status_t status);
 
 #endif
 

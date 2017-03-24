@@ -25,6 +25,7 @@
 #include "error_code.h"
 #include "http.h"
 #include "pcs_log.h"
+#include "task_db.h"
 
 static task_list_t *g_task_list = NULL;
 
@@ -71,7 +72,7 @@ static uint32_t ntohll(uint64_t n)
  * @brief 初始化TASK子模块
  *
  */
-int task_list_init()
+int task_list_init(void *http_context)
 {
     int ret = 0;
 
@@ -91,7 +92,9 @@ int task_list_init()
 
     list->done.prev = &(list->done);
     list->done.next = &(list->done);
-    list->done_cnt = 0;    
+    list->done_cnt = 0;
+
+    list->http_context = http_context;
 
     ret = pthread_mutex_init(list->mutex, NULL);
     if (ret != 0) {
@@ -1250,17 +1253,9 @@ static int task_thread_start(task_t *task)
 
 
 
-/**
- * @brief 添加一个任务
- *
- */
-int task_add(void *context, char *rpath, char *rmd5, 
-    uint64_t total_size, char *lpath)
+static int task_add_internal(void *context, char *rpath, char *rmd5, 
+    uint64_t total_size, char *lpath, int need_insert_db, task_status_t status)
 {
-
-    printf("%s %d %s : add task rpath %s, rmd5 %s, size %llu, lpath %s\n", __FILE__, __LINE__, __FUNCTION__,
-        rpath, rmd5, (unsigned long long)total_size, lpath);
-
     TASK_LOCK_SURE();
 
     /* look whether task exist ? */
@@ -1298,7 +1293,7 @@ int task_add(void *context, char *rpath, char *rmd5,
     task->rpath = pcs_utils_strdup(rpath);
     task->rmd5 = pcs_utils_strdup(rmd5);
     task->total_size = total_size;
-    task->status = TASK_STATUS_INIT;
+    task->status = status;
     time(&(task->start_ts));
     task->http_context = context;
 
@@ -1311,8 +1306,36 @@ int task_add(void *context, char *rpath, char *rmd5,
 
     TASK_UNLOCK_SURE();
 
-    /* start a thread to download */
-    return task_thread_start(task);
+    if (need_insert_db) {
+        task_db_add(g_task_list, task);
+    }
+
+    if (status == TASK_STATUS_INIT ||
+        status == TASK_STATUS_DOWNLOADING) {
+        /* start a thread to download */
+        return task_thread_start(task);  
+    }  
+
+    return 0;
+}
+
+int task_restore(void *context, unsigned int task_id, char *rpath, char *rmd5, 
+    uint64_t total_size, char *lpath, task_status_t status)
+{
+    return task_add_internal(context, rpath, rmd5, total_size, lpath, 0, status);
+}
+
+/**
+ * @brief 添加一个任务
+ *
+ */
+int task_add(void *context, char *rpath, char *rmd5, 
+    uint64_t total_size, char *lpath)
+{
+    printf("%s %d %s : add task rpath %s, rmd5 %s, size %llu, lpath %s\n", __FILE__, __LINE__, __FUNCTION__,
+        rpath, rmd5, (unsigned long long)total_size, lpath);
+
+    return task_add_internal(context, rpath, rmd5, total_size, lpath, 1, TASK_STATUS_INIT);
 }
 
 
