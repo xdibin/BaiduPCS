@@ -469,7 +469,7 @@ PCS_API PcsHttp pcs_http_create(const char *cookie_file)
 		curl_easy_setopt(http->curl, CURLOPT_COOKIEFILE, "");
 	}
 #if defined(DEBUG) || defined(_DEBUG)
-	curl_easy_setopt(http->curl, CURLOPT_VERBOSE, 1L);
+	//curl_easy_setopt(http->curl, CURLOPT_VERBOSE, 1L);
 #endif
 	return http;
 }

@@ -427,6 +427,10 @@ int main(int argc, char *argv[])
 		pcs_log("Can't create pcs context.\n");
 		return -1;
 	}
+
+	if (!is_http_login(&context)) {
+        pcs_log("Warning, not login server\n");
+    }
 	
 	task_list_init(&context);
 	

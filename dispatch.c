@@ -65,9 +65,9 @@ static char *json_encode_string(const char *src, char *dst, int *dst_len)
  *
  * @param context HTTP上下文
  *
- * @return 已经登陆返回PcsTrue，没有登陆返回PcsFalse
+ * @return 已经登陆返回PcsTrue 1 ，没有登陆返回PcsFalse 0
  */
-static PcsBool is_http_login(HttpContext *context)
+int is_http_login(HttpContext *context)
 {
 	PcsRes pcsres;
 	time_t now;
@@ -537,6 +537,8 @@ static int callback_download(HttpContext *context)
 	char *lname = NULL;
 	char *lpath = NULL;
 
+	int lpath_len = 0;
+
 	int err = 0;
 	int ret = ERRCODE_UNKNOWN;
 
@@ -544,17 +546,19 @@ static int callback_download(HttpContext *context)
 	int64_t offset = 0;
 	int force = 0;
 
-	xhttpd_http_t *xhttp = (xhttpd_http_t *)(context->http);
-	if (!xhttp || xhttp->method != XHTTPD_METHOD_POST || !(xhttp->content)) {
-		pcs_log("must post and json context\n");
-		return ERRCODE_ARG;
-	}
+	PcsFileInfo *meta = NULL;
 
 	cJSON *root = NULL;
 	cJSON *array = NULL;
 	cJSON *list = NULL;
 	cJSON *item = NULL;
-	int array_size = 0;
+	int array_size = 0;	
+
+	xhttpd_http_t *xhttp = (xhttpd_http_t *)(context->http);
+	if (!xhttp || xhttp->method != XHTTPD_METHOD_POST || !(xhttp->content) || xhttp->content_len <= 0) {
+		pcs_log("must post and json context\n");
+		return ERRCODE_ARG;
+	}
 
 	root = cJSON_Parse(xhttp->content);
 	if (!root) {
@@ -610,6 +614,7 @@ static int callback_download(HttpContext *context)
 	}
 
 	cJSON_Delete(root);
+	root = NULL;
 
 	/* check arguments */
 	if (!rpath || (rpath[0] != '/') || ( rpath[1] == '\0') ||
@@ -631,7 +636,7 @@ static int callback_download(HttpContext *context)
 		lname = pcs_utils_strdup(rr + 1);
 	}
 
-	int lpath_len = strlen(ldir) + strlen(lname) + 2;
+	lpath_len = strlen(ldir) + strlen(lname) + 12;
 	
 	lpath = (char *)pcs_malloc(lpath_len);
 	if (!lpath) {
@@ -673,7 +678,7 @@ static int callback_download(HttpContext *context)
 		} else {
 			/* check force overwrite flag is set or not ? */
 			if (force == 0) {
-				pcs_log("file exist not force overwrite is not set!\n");
+				pcs_log("file exist but force/overwrite is not set!\n");
 				ret =  ERRCODE_LOCAL_FILE;
 				goto download_out;
 			} else {
@@ -687,10 +692,37 @@ static int callback_download(HttpContext *context)
 		}
 	}
 
+	/* 检查是否存在临时文件 */
+	lpath_len = strlen(lpath);
+	strcpy(lpath + lpath_len, ".tmp");
+	if (stat(lpath, &st) == 0) {
+		if (!S_ISREG(st.st_mode)) {
+			/* not a file */
+			ret = ERRCODE_LOCAL_FILE;
+			goto download_out;
+		} else {
+			/* check force overwrite flag is set or not ? */
+			if (force == 0) {
+				pcs_log("file exist but force/overwrite is not set!\n");
+				ret =  ERRCODE_LOCAL_FILE;
+				goto download_out;
+			} else {
+				/* remove the local file */
+				unlink(lpath);
+				if (access(lpath, F_OK) == 0) {
+					ret =  ERRCODE_LOCAL_FILE;
+					goto download_out;
+				}
+			}
+		}
+	}
+
+	lpath[lpath_len] = '\0'; // restore the lpath name
+
 	pcs_log("rpath = %s, lpath = %s\n", rpath, lpath);
 
 	/* check remote file */
-	PcsFileInfo *meta = pcs_meta(context->pcs, rpath);
+	meta = pcs_meta(context->pcs, rpath);
 	if (!meta) {
 		ret = ERRCODE_REMOTE_FILE;
 		goto download_out;
@@ -724,6 +756,140 @@ download_out:
 	return ret;
 }
 
+/**
+ * @brief 查看下载任务列表
+ *
+ * @return 
+ */
+static int callback_task(HttpContext *context)
+{
+	task_info_list_t *list = NULL;
+	task_info_list_t *list_head = NULL;
+	char *json = NULL;
+	int len = 0;
+	int task_cnt;
+	int size = 0;
+
+	char *category_str = NULL;
+	char *order_str = NULL;
+	char *asc_str = NULL;
+	char *page_str = NULL;
+	char *num_str = NULL;
+
+	int i4_category = 0;//默认查看已完成任务列表	
+	int i4_order = 0;	//默认按时间排序
+	int i4_asc = 0;		//默认降序 
+	int i4_page = 1; 	//默认从第1页开始
+	int i4_num = 20; 	//默认每页显示20条
+
+	int skip_cnt = 0;
+	int skip_expect = 0;
+	int copy_cnt = 0;
+
+	pcs_log("callback task\n");
+
+	category_str = PARAM_GET(context, "category");
+	order_str = PARAM_GET(context, "order");
+	asc_str = PARAM_GET(context, "asc");
+	page_str = PARAM_GET(context, "page");
+	num_str = PARAM_GET(context, "num");
+
+	if (category_str) i4_category = atoi(category_str);
+	if (order_str) i4_order = atoi(order_str);
+	if (asc_str) i4_asc = atoi(asc_str);
+	if (page_str) i4_page = atoi(page_str);
+	if (num_str) i4_num = atoi(num_str);
+
+	if ((i4_category != 0 && i4_category != 1) ||
+		(i4_order != 0) ||
+		(i4_asc != 0 && i4_asc != 1) ||
+		(i4_page <= 0) ||
+		(i4_num <= 0 || i4_num > 1000)
+	) {
+		return ERRCODE_ARG;
+	}
+
+	skip_expect = (i4_page - 1) * i4_num;
+
+	if (i4_category == 0) {
+		//获取正在下载中的任务
+		task_cnt = task_info_run_list_get(&list_head);
+	} else if (i4_category == 1) {
+		//获取已下载完成的任务
+		task_cnt = task_info_complete_list_get(&list_head);
+	}
+
+	pcs_log("got task info list return %d\n", task_cnt);
+
+	if (task_cnt == -1) {
+		return ERRCODE_UNKNOWN;
+	} else if (task_cnt == 0 || task_cnt < skip_expect) {
+		//没有数据，或者已经超过分页展示数
+		char buff[256];
+		int buff_len = 0;
+
+		task_info_list_free(list_head);
+
+		buff_len = snprintf(buff, sizeof(buff), "{\"errno\":0,\"task\":[],\"has_more\":0}");
+		
+		http_response_by_xhttpd(context, buff, buff_len);
+
+		return 0;
+	}
+
+	task_info_list_sort(&list_head, i4_order, i4_asc);
+
+	list = list_head;
+
+	size = i4_num * 1024 + 128; // 每一个任务分配1KB内存来存json
+	if ((json = pcs_malloc(size)) == NULL) {
+		task_info_list_free(list_head);
+		return ERRCODE_MEMORY;
+	}
+	memset(json, 0, size);
+
+	len = snprintf(json, size, "{\"errno\":0,\"task\":[");
+
+	//跳过前面的 0 - i4_page * i4_num
+	for (skip_cnt = 0, list = list_head; list && skip_cnt < skip_expect; skip_cnt++) {
+		list = list->next;
+	}
+
+	while (list && copy_cnt < i4_num) {
+		len += snprintf(json + len, size - len, "{"
+			"\"lpath\":\"%s\",\"rpath\":\"%s\",\"rmd5\":\"%s\","
+			"\"total_size\":%llu,\"download_size\":%llu,\"status\":%u,"
+			"\"start_ts\":%u,\"download_ts\":%u,\"complete_ts\":%u"
+			"},",
+			list->lpath, list->rpath, list->rmd5,
+			(unsigned long long)list->total_size, (unsigned long long)list->download_size, list->status,
+			(unsigned int)list->start_ts, (unsigned int)list->download_ts, (unsigned int)list->complete_ts
+		);
+
+		list = list->next;
+
+		copy_cnt++;
+	}
+
+	if (json[len - 1] == ',') {
+		json[len -1] = '\0';
+		len--;
+	}
+
+	len += snprintf(json + len, size - len, "],\"has_more\":%d}", list ? 1 : 0);
+
+	task_info_list_free(list_head);
+
+	pcs_log("task response len = %d is \n%s\n", len, json);
+
+	http_response_by_xhttpd(context, json, len);
+
+	pcs_free(json);
+
+	return 0;
+}
+
+
 static void http_response_error(HttpContext *context, int error_code)
 {
 	char buf[1024];
@@ -750,7 +916,8 @@ static const DispatchTable dispatch_table[] = {
 	{ "logout",		callback_logout		},
 	{ "meta",		callback_meta 		},
 	{ "quota",		callback_quota	 	},
-	{ "download",	callback_download	}
+	{ "download",	callback_download	},
+	{ "task",		callback_task       }
 };
 
 /**

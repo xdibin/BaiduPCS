@@ -24,16 +24,21 @@
 #define TASK_CFG_FLUSH_INCR         (1 << 20)
 
 
+#define TASK_FILE_TMP_EXT_NAME      ".tmp"
+
+#define TASK_FILE_TMP_EXT_NAME_SIZE  (sizeof(TASK_FILE_TMP_EXT_NAME))
+
+
 typedef enum task_status {
-    TASK_STATUS_NONE,
-    TASK_STATUS_INIT,
-    TASK_STATUS_DOWNLOADING,
-    TASK_STATUS_COMPLETE,
-    TASK_STATUS_PAUSE,
-    TASK_STATUS_STOP,
-    TASK_STATUS_REMOTE_ERROR,
-    TASK_STATUS_LOCAL_ERROR,
-    TASK_STATUS_NETWORK_ERROR,    
+    TASK_STATUS_NONE = 0,
+    TASK_STATUS_INIT = 1,
+    TASK_STATUS_DOWNLOADING = 2,
+    TASK_STATUS_COMPLETE =3 ,
+    TASK_STATUS_PAUSE = 4,
+    TASK_STATUS_STOP = 5,
+    TASK_STATUS_REMOTE_ERROR = 6,
+    TASK_STATUS_LOCAL_ERROR = 7,
+    TASK_STATUS_NETWORK_ERROR = 8,    
 } task_status_t;
 
 
@@ -44,6 +49,13 @@ enum task_subtask_type {
     SUBTASK_TYPE_MAX_LARGE = 3     /**< 有max片，且每片都大于min size */
 };
 
+
+enum task_info_list_sort_order {
+    TASK_INFO_LIST_SORT_ORDER_NONE = -1,
+    TASK_INFO_LIST_SORT_ORDER_TIME,
+
+    TASK_INFO_LIST_SORT_ORDER_MAX
+};
 
 typedef struct task_buffer {
     void *base;         /**< 缓冲基地址 */
@@ -78,7 +90,7 @@ typedef struct task_sub {
 } task_sub_t;
 
 
-#define SLICE_TABLE_START       0x40
+#define SLICE_TABLE_START       0x80
 
 
 
@@ -88,6 +100,7 @@ struct task_cfg_head {
     unsigned char version;              /**< 版本号，目前固定为 1 */
     unsigned char slice_cnt;            /**< 文件分片个数 */
     unsigned short slice_table_start;   /**< 文件分片表开始位置，分片结构为 task_file_slice_t 类型 */
+    uint64_t total_size;                /**< 文件的总长度 */
     unsigned char md5[16];              /**< cfg文件的MD5，计算范围：文件头+分片表 */
 } __attribute__((packed));
 
@@ -101,15 +114,16 @@ typedef struct task {
     char *url;              /**< 任务的URL地址 */
     char *rpath;            /**< 文件的远端地址 */
     char *lpath;            /**< 文件的本端地址 */
+    char *lpath_tmp;        /**< 本地文件的临时文件名 */
     char *rmd5;             /**< 文件的远端MD5 */
     char *rcid;             /**< 文件的远端CID */
 
     uint64_t total_size;        /**< 文件总大小 */
-    uint64_t download_size;     /**< 文件已下载大小 */
+    volatile uint64_t download_size;     /**< 文件已下载大小 */
     volatile task_status_t status;       /**< 任务的当前状态 */
 
     time_t start_ts;            /**< 任务开始时间 */
-    time_t download_ts;         /**< 任务下载总时间 */
+    volatile time_t download_ts;         /**< 任务下载总时间 */
     time_t complete_ts;         /**< 任务完成时间 */
 
     unsigned int tpid;          /**< Linux thread pid */
@@ -145,6 +159,22 @@ typedef struct task_list {
 } task_list_t;
 
 
+typedef struct task_info_list {
+    struct task_info_list *next;
+
+    char *lpath;                /**< 任务的本地路径 */
+    char *rpath;                /**< 任务的远程路径 */
+    char *rmd5;                 /**< 任务的远程MD5 */
+
+    uint64_t total_size;        /**< 文件总大小 */
+    uint64_t download_size;     /**< 文件已下载大小 */
+    task_status_t status;       /**< 任务的当前状态 */
+
+    time_t start_ts;            /**< 任务开始时间 */
+    time_t download_ts;         /**< 任务下载总时间 */
+    time_t complete_ts;         /**< 任务完成时间 */  
+} task_info_list_t;
+
 
 int task_list_init(void *http_context);
 
@@ -153,8 +183,14 @@ int task_list_exit();
 int task_add(void *context, char *rpath, char *rmd5, 
     uint64_t total_size, char *lpath);
 
-int task_restore(void *context, unsigned int task_id, char *rpath, char *rmd5, 
-    uint64_t total_size, char *lpath, task_status_t status);
+int task_restore(void *context, char *rpath, char *rmd5, 
+    uint64_t total_size, char *lpath, task_status_t status, unsigned int download_ts);
+
+int task_info_run_list_get(task_info_list_t **list);
+
+int task_info_list_free(task_info_list_t *list);
+
+int task_info_list_sort(task_info_list_t **list, enum task_info_list_sort_order order, int ascending);
 
 #endif
 

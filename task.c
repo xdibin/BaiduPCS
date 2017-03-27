@@ -53,6 +53,8 @@ static task_list_t *g_task_list = NULL;
 
 static int task_cfg_restore(task_t *task);
 
+static int task_cfg_flush(task_t *task);
+
 static uint64_t htonll(uint64_t h)
 {
     uint64_t u64 = htonl(h & 0xffffffff);
@@ -60,7 +62,7 @@ static uint64_t htonll(uint64_t h)
     return (u64 << 32) | (htonl(h >> 32) & 0xffffffff);
 }
 
-static uint32_t ntohll(uint64_t n)
+static uint64_t ntohll(uint64_t n)
 {
     return htonll(n);
 }
@@ -106,6 +108,8 @@ int task_list_init(void *http_context)
 
     g_task_list = list;
 
+    task_db_init(g_task_list);
+
     return 0;
 }
 
@@ -119,12 +123,14 @@ int task_list_exit()
     pcs_log("task list exit ...\n");
 
     task_list_t *list = g_task_list;
-    task_t *task = NULL;
-    task_t *task_next = NULL;
 
     if (!list) {
         return 0;
     }
+
+#if 0
+    task_t *task = NULL;
+    task_t *task_next = NULL;
 
     TASK_LOCK_SURE();
 
@@ -133,16 +139,21 @@ int task_list_exit()
         task_next = task->next;
 
         pcs_log("signal to stop task, id %d\n", task->task_id);
-        task->status = TASK_STATUS_STOP;
+        
         task = task_next;
     }
 
     TASK_UNLOCK_SURE();
+#endif    
 
     /* wait all tasks to stop */
+    pcs_log("wait all task thread to exit...\n");
     while (list->run_cnt > 0) {
         usleep(10);
     }
+    pcs_log("all task exited\n");
+
+    task_db_exit(list);
 
     pthread_mutex_destroy((pthread_mutex_t *)(list->mutex));
 
@@ -301,12 +312,12 @@ static int task_init_file(task_t *task)
      * 网上的说法是没必要，因为普通文件任何时候都是可读可写的
      * https://www.remlab.net/op/nonblock.shtml
      */
-    task->file->fd = open(task->lpath, 
+    task->file->fd = open(task->lpath_tmp, 
         O_RDWR | O_CLOEXEC | O_CREAT /*| O_NONBLOCK*/, 
         S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
     if (task->file->fd == -1) {
         err = errno;
-        printf("open file failed, %s, %s\n", task->lpath, strerror(err));
+        printf("open file failed, %s, %s\n", task->lpath_tmp, strerror(err));
         return -1;
     }
 
@@ -330,7 +341,7 @@ static size_t task_head_recv_callback(char *buffer, size_t size, size_t nmemb, v
 
     assert(subtask != NULL);
 
-    if (subtask->task->status == TASK_STATUS_STOP) {
+    if (!g_pcs_running || subtask->task->status == TASK_STATUS_STOP) {
         pcs_log("task is stopping\n");
         return 0;
     }
@@ -417,7 +428,7 @@ static size_t task_file_write_callback(char *buffer, size_t size, size_t nmemb, 
 
     size_t recv_size = size * nmemb;
 
-    if (subtask->task->status == TASK_STATUS_STOP) {
+    if (!g_pcs_running || subtask->task->status == TASK_STATUS_STOP) {
         pcs_log("task is stopping\n");
         return 0;
     }
@@ -499,7 +510,6 @@ static int task_init_curl(task_t *task)
     int subtask_cnt = task->subtask_cnt;
     struct HttpContext *context = (struct HttpContext *)(task->http_context);   
 
-    uint64_t offset = 0;
     CURL *curl = NULL;
     int i = 0;
     char range[128];
@@ -538,21 +548,25 @@ static int task_init_curl(task_t *task)
     }
 
     //curl_multi_setopt(cm, CURLMOPT_MAXCONNECTS, (long)subtask_cnt);
-
-    offset = 0;
     for (i = 0; i < subtask_cnt; i++) {
         task->subtask[i].task = task;
         task->subtask[i].subtask_id = i;
         task->subtask[i].file_slice = task->file->slices + i;
 
+        /* FIXME:  如果当前分片已经下载完毕了，那就没必要再开一个CURL子任务了 */
+        if (task->subtask[i].file_slice->offset_current >= task->subtask[i].file_slice->offset_base + task->subtask[i].file_slice->slice_size) {
+            pcs_log("file slice %d already download completely\n", i);
+            continue;
+        }
+
         curl = curl_easy_init();
         if (curl == NULL) {
             pcs_log("init curl %d failed\n", i);
-            return -1;
+            continue;
         }
 
 #if defined(DEBUG) || defined(_DEBUG)        
-        curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+        //curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 #endif
 
         curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, task_head_recv_callback);
@@ -566,11 +580,11 @@ static int task_init_curl(task_t *task)
         //curl_easy_setopt(curl, CURLOPT_PRIVATE, NULL);
                         
         snprintf(range, sizeof(range) - 1, "%llu-%llu", 
-            (unsigned long long)offset, (unsigned long long)(offset + task->subtask[i].file_slice->slice_size - 1));
+            (unsigned long long)(task->subtask[i].file_slice->offset_current), 
+            (unsigned long long)(task->subtask[i].file_slice->offset_base + task->subtask[i].file_slice->slice_size - 1));
         
         printf("set subtask %d range, %s\n", i, range);
 
-        offset += task->subtask[i].file_slice->slice_size;
         curl_easy_setopt(curl, CURLOPT_RANGE, range);
 
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
@@ -637,6 +651,8 @@ static int task_init(task_t *task)
         goto init_failed;
     }
 
+    task->status = TASK_STATUS_DOWNLOADING;
+
     return 0;
 
 init_failed:
@@ -681,7 +697,11 @@ static void task_summary_show(task_t *task)
 {
     char time_str[128];
 
-    unsigned int speed = task->download_size / task->download_ts;
+    unsigned int speed = 0;
+
+    if (task->download_ts > 0) {
+        speed = (task->download_size / task->download_ts);
+    }
 
     printf("\ntask summary:\n");
     printf("pthread pid      : %u\n", task->tpid);
@@ -736,6 +756,11 @@ static int task_exit(task_t *task)
         task->lpath = NULL;
     }
 
+    if (task->lpath_tmp) {
+        pcs_free(task->lpath_tmp);
+        task->lpath_tmp = NULL;
+    }    
+
     if (task->rmd5) {
         pcs_free(task->rmd5);
         task->rmd5 = NULL;
@@ -751,9 +776,11 @@ static int task_exit(task_t *task)
             pcs_free(task->file->slices);
             task->file->slices = NULL;
         }
-        fsync(task->file->fd);
-        close(task->file->fd);
-        task->file->fd = -1;        
+        if (task->file->fd > 0) {
+            fsync(task->file->fd);
+            close(task->file->fd);
+            task->file->fd = -1;
+        }   
         pcs_free(task->file);
         task->file = NULL;
     }
@@ -810,6 +837,8 @@ static int task_exit(task_t *task)
 
 static void task_result_check(task_t *task)
 {
+    int err;
+
 #if 0    
     struct CURLMsg *m = NULL;
     CURL *e = NULL;
@@ -832,6 +861,47 @@ static void task_result_check(task_t *task)
         }
     } while(m);
 #endif
+
+    if (task->download_size > task->total_size) {
+        pcs_log("Warning, download file toot large, may corrupted, %s\n", task->lpath);
+        /* 截断文件 */
+        if (ftruncate(task->file->fd, task->total_size) == -1) {
+            err = errno;
+            pcs_log("truncate file failed, %s %s\n", task->lpath_tmp, strerror(err));
+        }
+        task->status = TASK_STATUS_COMPLETE;
+    }
+    
+    if (task->download_size >= task->total_size) {
+        pcs_log("download completely, %s\n", task->lpath);
+        /* 重命名 */
+        fsync(task->file->fd);
+        close(task->file->fd); 
+        task->file->fd = -1;
+
+        if ((rename(task->lpath_tmp, task->lpath)) == -1) {
+            err = errno;
+            pcs_log("rename the tmp file failed, %s %s\n", task->lpath_tmp, strerror(err));
+            task->status = TASK_STATUS_LOCAL_ERROR;
+        } else {
+            pcs_log("rename the task tmp file success, %s\n", task->lpath_tmp);
+            task->status = TASK_STATUS_COMPLETE;
+        }
+
+        /* 删除CFG文件 */
+        pcs_log("remove cfg file, %s\n", task->cfg_name);
+        unlink(task->cfg_name);
+        pcs_free(task->cfg_name);
+        task->cfg_name = NULL;
+    }
+
+    /* 更新数据库和cfg文件(如果有) */
+    task_db_update(g_task_list, task);
+
+    if (task->cfg_name) {
+        task_cfg_flush(task);
+    }
+
 }
 
 
@@ -867,11 +937,11 @@ static int task_cfg_create(task_t *task)
         slice.slice_size = htonll(task->file->slices[i].slice_size);
         slice.offset_current = htonll(task->file->slices[i].offset_current);
 
-        pcs_log("subtask %d, start from %llx, total size 0x%llx, offset current size 0x%llx\n",
+        pcs_log("subtask %d, offset base %llx, slice size 0x%llx, offset current 0x%llx\n",
             i,
-            (unsigned long long)task->file->slices[i].offset_base,
-            (unsigned long long)task->file->slices[i].slice_size,
-            (unsigned long long)task->file->slices[i].offset_current);
+            (unsigned long long)(task->file->slices[i].offset_base),
+            (unsigned long long)(task->file->slices[i].slice_size),
+            (unsigned long long)(task->file->slices[i].offset_current));
 
         if (write(fd, &slice, sizeof(task_file_slice_t)) == -1) {
             err = errno;
@@ -889,6 +959,7 @@ static int task_cfg_create(task_t *task)
     head.version = 1;
     head.slice_cnt = task->subtask_cnt & 0xff;
     head.slice_table_start = htons(SLICE_TABLE_START);
+    head.total_size = htonll(task->total_size);
 
     if (lseek(fd, 0, SEEK_SET) == -1) {
         err = errno;
@@ -954,9 +1025,9 @@ static int task_cfg_flush(task_t *task)
             return -1;
         }
 
-        pcs_log("flush subtask %d offset_current 0x%llx\n", i, (unsigned long long)task->file->slices[i].offset_current);
+        pcs_log("flush subtask %d offset_current to 0x%llx\n", i, (unsigned long long)(task->file->slices[i].offset_current));
 
-        if (write(fd, &curr, sizeof(task_file_slice_t)) == -1) {
+        if (write(fd, &curr, sizeof(curr)) == -1) {
             err = errno;
             pcs_log("write file failed, %s %s\n", task->cfg_name, strerror(err));
             close(fd);
@@ -1002,7 +1073,7 @@ static int task_cfg_restore(task_t *task)
     
     memcpy(filename, task->lpath, ptr - task->lpath);
 
-    pcs_log("filename is %s\n", filename);
+    //pcs_log("filename is %s\n", filename);
 
     int len = strlen(filename);
 
@@ -1061,13 +1132,15 @@ static int task_cfg_restore(task_t *task)
     //检查文件大小
     unsigned int size_expect = head.slice_table_start + (head.slice_cnt * sizeof(task_file_slice_t));
     if (size_expect != st.st_size) {
-        pcs_log("cfg file size exepect is %u, but real size is %u\n", size_expect, (unsigned int)st.st_size);
+        pcs_log("Warning, cfg file size exepect is %u, but real size is %u\n", size_expect, (unsigned int)st.st_size);
         close(fd);
         return -1;
     }
 
 
     task->subtask_cnt = head.slice_cnt;
+
+    head.total_size = ntohll(head.total_size);
 
     pcs_log("got subtask cnt %d\n", task->subtask_cnt);
 
@@ -1076,14 +1149,25 @@ static int task_cfg_restore(task_t *task)
         return -1;
     }
 
+    /* 打开文件，继续下载 */
+    if ((task->file->fd = open(task->lpath_tmp, O_RDWR | O_CLOEXEC)) == -1) {
+        err = errno;
+        pcs_log("open file failed, %s, %s\n", task->lpath_tmp, strerror(err));
+        close(fd);
+        return -1;
+    }    
+
     task_file_slice_t slice;
     int i;
+    uint64_t download_size = 0;
+    uint64_t total_size = 0;
 
     for (i = 0; i < head.slice_cnt; i++) {
         memset(&slice, 0, sizeof(task_file_slice_t));
         if (read(fd, &slice, sizeof(task_file_slice_t)) == -1) {
             err = errno;
             pcs_log("lseek failed, %s %s\n", task->cfg_name, strerror(err));
+            close(task->file->fd); task->file->fd = -1;
             close(fd);
             return -1;        
         }
@@ -1092,14 +1176,32 @@ static int task_cfg_restore(task_t *task)
         task->file->slices[i].slice_size = ntohll(slice.slice_size);
         task->file->slices[i].offset_current = ntohll(slice.offset_current);
 
-        pcs_log("subtask %d, offset_base 0x%llx, total size 0x%llu, offset_current 0x%llu\n",
+        if (task->file->slices[i].offset_current <  task->file->slices[i].offset_base || 
+            task->file->slices[i].offset_current > task->file->slices[i].offset_base + task->file->slices[i].slice_size) {
+            pcs_log("task %d current offset is error, ignore this current and reset to base offset\n", i);
+            task->file->slices[i].offset_current = task->file->slices[i].offset_base;
+        }
+
+        task->subtask[i].download_size = task->file->slices[i].offset_current - task->file->slices[i].offset_base;
+        download_size += task->subtask[i].download_size;
+
+        total_size += task->file->slices[i].slice_size;
+
+        pcs_log("subtask %d, offset_base 0x%llx, slice size 0x%llx, offset_current 0x%llx, download size = 0x%llx\n",
             i,
-            (unsigned long long)task->file->slices[i].offset_base,
-            (unsigned long long)task->file->slices[i].slice_size,
-            (unsigned long long)(task->file->slices[i].offset_current));
+            (unsigned long long)(task->file->slices[i].offset_base),
+            (unsigned long long)(task->file->slices[i].slice_size),
+            (unsigned long long)(task->file->slices[i].offset_current),
+            (unsigned long long)(task->subtask[i].download_size));
     }
 
     close(fd);
+
+    task->download_size = download_size;
+
+    if (total_size != head.total_size) {
+        pcs_log("Warning, file total size may error\n");
+    }
 
     return task->subtask_cnt;
 }
@@ -1118,13 +1220,12 @@ static int task_loop(task_t *task)
     fd_set fdexcep;
     int maxfd = -1;
 
-    long curl_timeout = -1;
-
     time_t ts_1;
     time_t ts_2;
 
     time_t ts_3;
     time_t ts_4;
+    time_t ts_5;
 
     uint64_t dl_cnt = 0;
 
@@ -1134,20 +1235,21 @@ static int task_loop(task_t *task)
 
     pcs_log("task loop ...\n");
 
-    do {        
+    do {
+        time(&ts_5);
         /* we start some action by calling perform right away */ 
         curl_multi_perform(task->cm, &still_running);
-
-        curl_timeout = -1;
 
         FD_ZERO(&fdread);
         FD_ZERO(&fdwrite);
         FD_ZERO(&fdexcep);
         
         /* default timeout value */
-        timeout.tv_sec = 1;
-        timeout.tv_usec = 0;
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 100 * 1000; //100ms, 0.1s
 
+#if 0
+        long curl_timeout = -1;
         curl_multi_timeout(task->cm, &curl_timeout);
         if(curl_timeout > 0) {
             timeout.tv_sec = curl_timeout / 1000;
@@ -1157,7 +1259,8 @@ static int task_loop(task_t *task)
                 timeout.tv_usec = (curl_timeout % 1000) * 1000;
             }
         }
-    
+#endif
+
         /* get file descriptors from the transfers */ 
         mc = curl_multi_fdset(task->cm, &fdread, &fdwrite, &fdexcep, &maxfd);
     
@@ -1185,6 +1288,9 @@ static int task_loop(task_t *task)
 
         /* check need to flush cfg info */
         time(&ts_4);
+
+        task->download_ts += (ts_4 - ts_5); // 增加下载时长计数器
+
         if ((ts_4 - ts_3 > TASK_CFG_FLUSH_INTERVAL) && 
             (task->download_size - dl_cnt > TASK_CFG_FLUSH_INCR)) {
             //尝试刷新
@@ -1198,9 +1304,7 @@ static int task_loop(task_t *task)
     time(&ts_2);
     
     task->complete_ts = ts_2;
-
-    task->download_ts += (ts_2 - ts_1);
-    
+       
     task_result_check(task);
 
     return 0;
@@ -1253,9 +1357,15 @@ static int task_thread_start(task_t *task)
 
 
 
-static int task_add_internal(void *context, char *rpath, char *rmd5, 
-    uint64_t total_size, char *lpath, int need_insert_db, task_status_t status)
+static int task_add_internal(void *context, const task_t *task_ref, int need_insert_db)
 {
+    assert(context != NULL);
+
+    int ret = 0;
+
+    char *lpath = task_ref->lpath;
+    char *rpath = task_ref->rpath;
+
     TASK_LOCK_SURE();
 
     /* look whether task exist ? */
@@ -1290,10 +1400,19 @@ static int task_add_internal(void *context, char *rpath, char *rmd5,
     memset(task->tid, 0, sizeof(pthread_t));
 
     task->lpath = pcs_utils_strdup(lpath);
+
+    int len = strlen(task->lpath) + TASK_FILE_TMP_EXT_NAME_SIZE;
+    task->lpath_tmp = pcs_malloc(len);
+    if (task->lpath_tmp == NULL) {
+        assert(0);      
+    }
+    memset(task->lpath_tmp, 0, len);
+    snprintf(task->lpath_tmp, len, "%s%s", task->lpath, TASK_FILE_TMP_EXT_NAME);
+
     task->rpath = pcs_utils_strdup(rpath);
-    task->rmd5 = pcs_utils_strdup(rmd5);
-    task->total_size = total_size;
-    task->status = status;
+    task->rmd5 = pcs_utils_strdup(task_ref->rmd5);
+    task->total_size = task_ref->total_size;
+    task->status = task_ref->status;
     time(&(task->start_ts));
     task->http_context = context;
 
@@ -1307,11 +1426,21 @@ static int task_add_internal(void *context, char *rpath, char *rmd5,
     TASK_UNLOCK_SURE();
 
     if (need_insert_db) {
-        task_db_add(g_task_list, task);
+        ret = task_db_add(g_task_list, task);
+        if (ret == -1) {
+            pcs_log("add task to db failed\n");
+            return -1;
+        }        
+    } else {
+        ret = task_db_mnt_set(g_task_list, task);
+        if (ret == -1) {
+            pcs_log("set task mnt failed\n");
+            return -1;
+        } 
     }
 
-    if (status == TASK_STATUS_INIT ||
-        status == TASK_STATUS_DOWNLOADING) {
+    if (task->status == TASK_STATUS_INIT ||
+        task->status == TASK_STATUS_DOWNLOADING) {
         /* start a thread to download */
         return task_thread_start(task);  
     }  
@@ -1319,10 +1448,20 @@ static int task_add_internal(void *context, char *rpath, char *rmd5,
     return 0;
 }
 
-int task_restore(void *context, unsigned int task_id, char *rpath, char *rmd5, 
-    uint64_t total_size, char *lpath, task_status_t status)
+int task_restore(void *context, char *rpath, char *rmd5, 
+    uint64_t total_size, char *lpath, task_status_t status, unsigned int download_ts)
 {
-    return task_add_internal(context, rpath, rmd5, total_size, lpath, 0, status);
+    task_t task;
+    memset(&task, 0, sizeof(task_t));
+    task.rpath = rpath;
+    task.lpath = lpath;
+    task.total_size = total_size;
+    task.rmd5 = rmd5;
+    task.status = status;
+    task.download_ts = (time_t)download_ts;
+    /* FIXME: 任务的下载进度 download_size 由 cfg 文件里面读取的为准 */
+
+    return task_add_internal(context, &task, 0);
 }
 
 /**
@@ -1335,7 +1474,15 @@ int task_add(void *context, char *rpath, char *rmd5,
     printf("%s %d %s : add task rpath %s, rmd5 %s, size %llu, lpath %s\n", __FILE__, __LINE__, __FUNCTION__,
         rpath, rmd5, (unsigned long long)total_size, lpath);
 
-    return task_add_internal(context, rpath, rmd5, total_size, lpath, 1, TASK_STATUS_INIT);
+    task_t task;
+    memset(&task, 0, sizeof(task_t));
+    task.rpath = rpath;
+    task.lpath = lpath;
+    task.total_size = total_size;
+    task.rmd5 = rmd5;
+    task.status = TASK_STATUS_INIT;
+
+    return task_add_internal(context, &task, 1);
 }
 
 
@@ -1346,6 +1493,7 @@ int task_add(void *context, char *rpath, char *rmd5,
 /**
  * @brief 删除一个任务
  *
+ * 
  */
 int task_del()
 {
@@ -1373,16 +1521,230 @@ int task_resume()
      return 0;
 }
 
-/**
- * @brief 查看任务列表
- *
- */
-task_t *task_list()
-{
-    task_t *list = NULL;
 
-    return list;
+static int task_info_list_cmp_start_ts(task_info_list_t *a, task_info_list_t *b)
+{
+    if (a->start_ts > b->start_ts) {
+        return 1;
+    } else if (a->start_ts < b->start_ts) {
+        return -1;
+    } else {
+        return 0;
+    }
+}
+
+/**
+ * 获取列表里面最大或最小的节点，并将其从队列中删除，然后返回该元素
+ */
+static task_info_list_t *task_info_list_node_get_and_remove(
+    task_info_list_t **list_head, 
+    int get_max, 
+    int (*task_info_list_cmp)(task_info_list_t *a, task_info_list_t *b))
+{
+    task_info_list_t *list = NULL;
+    task_info_list_t *list_prev = NULL;
+    task_info_list_t *guard = NULL;
+    task_info_list_t *guard_prev = NULL;
+    int ret;
+
+    if (!list_head || (!*list_head) || !task_info_list_cmp) {
+        return NULL;
+    }
+
+    if ((*list_head)->next == NULL) {
+        //只有一个元素
+        //pcs_log("only one node\n");
+        guard = *list_head;
+        *list_head = NULL;
+        return guard;
+    }
+
+    list_prev = *list_head;
+    guard = *list_head;
+
+    list = (*list_head)->next;
+
+    while (list) {
+        ret = task_info_list_cmp(list, guard);
+        if (get_max) {
+            //获取最大值
+            if (ret > 0) {
+                guard = list;
+                guard_prev = list_prev;
+            }
+        } else {
+            //获取最小值
+            if (ret < 0) {
+                guard = list;
+                guard_prev = list_prev;
+            }
+        }
+
+        list_prev = list;
+        list = list->next;
+    }
+
+    //从列表中删除guard节点
+    if (guard_prev) {
+        //guard非首节点
+        guard_prev->next = guard->next;
+    } else {
+        //guard是首节点
+        *list_head = guard->next;
+    }
+
+    guard->next = NULL;
+
+    return guard;
+}
+
+/**
+ * 按时间排序
+ * 采用插入排序算法
+ */
+static int task_info_list_sort_by_time(task_info_list_t **list, int ascending)
+{
+    task_info_list_t *head = NULL;
+    task_info_list_t *tail = NULL;
+    task_info_list_t *getted = NULL;
+
+    task_info_list_t **list_head = list;
+
+    while (*list_head) {
+        getted = task_info_list_node_get_and_remove(list_head, !ascending, task_info_list_cmp_start_ts);
+
+        if (getted == NULL) {
+            break;
+        }
+
+        if (head) {
+            tail->next = getted;
+            tail = getted;
+        } else {
+            head = getted;
+            tail = getted;        
+        }
+    }
+
+    *list = head;
+
+    return 0;
 }
 
 
+int task_info_list_sort(task_info_list_t **list, enum task_info_list_sort_order order, int ascending)
+{
+    if (!list) {
+        pcs_log("invalid list argument\n");
+        return -1;
+    }
 
+    switch (order) {
+    case TASK_INFO_LIST_SORT_ORDER_TIME:
+        return task_info_list_sort_by_time(list, ascending);
+    default:
+        pcs_log("order is error, %d\n", order);
+        return -1;
+    }
+
+    return -1;
+}
+
+
+/**
+ * @brief 获取正在下载的任务列表
+ *
+ */
+int task_info_run_list_get(task_info_list_t **list)
+{
+    if (g_task_list == NULL || !list) {
+        return -1;
+    }
+
+    task_info_list_t *tlist = NULL;
+    task_info_list_t *tlist_head = NULL;
+    task_info_list_t *tlist_tail = NULL;
+    task_t *task = NULL;
+    int cnt = 0;
+
+    TASK_LOCK_SURE();
+
+    task = g_task_list->run.next;
+
+    while (task != &(g_task_list->run)) {
+        if ((tlist = pcs_malloc(sizeof(task_info_list_t))) == NULL) {
+            pcs_log("malloc failed\n");
+            break;
+        }
+        memset(tlist, 0, sizeof(task_info_list_t));
+        tlist->rpath = pcs_utils_strdup(task->rpath);
+        tlist->lpath = pcs_utils_strdup(task->lpath);
+        tlist->rmd5 = pcs_utils_strdup(task->rmd5);
+        tlist->total_size = task->total_size;
+        tlist->download_size = task->download_size;
+        tlist->status = task->status;
+        tlist->start_ts = task->start_ts;
+        tlist->download_ts = task->download_ts;
+        tlist->complete_ts = task->complete_ts;
+
+        if (tlist_head) {
+            tlist_tail->next = tlist;
+            tlist_tail = tlist;
+        } else {
+            tlist_head = tlist;
+            tlist_tail = tlist;
+        }
+        
+        cnt++;
+
+        task = task->next;
+    }
+
+    TASK_UNLOCK_SURE();
+
+    *list = tlist_head;
+
+    return cnt;
+}
+
+
+int task_info_list_free(task_info_list_t *list)
+{
+    task_info_list_t *next = NULL;
+
+    while (list) {
+        next = list->next;
+
+        if (list->rpath) pcs_free(list->rpath);
+        if (list->lpath) pcs_free(list->lpath);
+        if (list->rmd5) pcs_free(list->rmd5);
+
+        pcs_free(list);
+
+        list = next;
+    }
+
+    return 0;
+}
+
+
+/**
+ * @brief 获取正在下载的任务列表
+ *
+ */
+int task_info_complete_list_get(task_info_list_t **list)
+{
+    if (g_task_list == NULL || !list) {
+        return -1;
+    }
+
+    task_info_list_t *list_head = NULL;
+    int cnt = 0;
+
+    /* 已完成任务保存到数据库了，内存中没有 */
+    cnt = task_db_complete_task_get(g_task_list, &list_head);
+
+    *list = list_head;
+
+    return cnt;
+}

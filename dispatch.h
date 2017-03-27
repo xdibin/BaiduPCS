@@ -10,4 +10,6 @@
 
 int http_loop(HttpContext *context);
 
+int is_http_login(HttpContext *context);
+
 #endif /* _DISPATCH_H */

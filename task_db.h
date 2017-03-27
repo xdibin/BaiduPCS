@@ -23,12 +23,20 @@ struct task;
 
 struct task_list;
 
+struct task_info_list;
+
 int task_db_init(struct task_list *task_list);
 
+int task_db_exit(struct task_list *task_list);
+
 int task_db_add(struct task_list *task_list, struct task *task);
+
+int task_db_mnt_set(struct task_list *task_list, struct task *task);
 
 int task_db_del(struct task_list *task_list, struct task *task);
 
 int task_db_update(struct task_list *task_list, struct task *task);
+
+int task_db_complete_task_get(struct task_list *task_list, struct task_info_list **info_list);
 
 #endif
