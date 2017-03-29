@@ -188,9 +188,15 @@ int task_restore(void *context, char *rpath, char *rmd5,
 
 int task_info_run_list_get(task_info_list_t **list);
 
+int task_info_complete_list_get(task_info_list_t **list);
+
 int task_info_list_free(task_info_list_t *list);
 
 int task_info_list_sort(task_info_list_t **list, enum task_info_list_sort_order order, int ascending);
+
+int task_check_exist(const char *lpath, int force);
+
+int task_del(const char *lpath);
 
 #endif
 

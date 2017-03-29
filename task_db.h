@@ -7,7 +7,7 @@
 
 
 typedef struct task_mnt {
-    char *mnt;          /**< 磁盘分区挂载点, e.g. /mnt/sda1 */
+    char *mnt;          /**< 磁盘分区挂载点, e.g. /mnt/sda1/ 注意：必须包含最后一个斜杠，便于字符串比较 */
     int mnt_len;        /**< mnt字段的长度 */
     char *dev;          /**< 设备分区节点, e.g. /dev/sda1 */
 
@@ -38,5 +38,11 @@ int task_db_del(struct task_list *task_list, struct task *task);
 int task_db_update(struct task_list *task_list, struct task *task);
 
 int task_db_complete_task_get(struct task_list *task_list, struct task_info_list **info_list);
+
+int task_db_check_exist(task_mnt_t *mnt, const char *lpath);
+
+int task_db_del_by_lpath(task_mnt_t *mnt, const char *lpath);
+
+int create_dir_r(const char *dir);
 
 #endif

@@ -118,7 +118,12 @@ static int task_mnt_init(task_mnt_t **mnt)
                 start = ++ptr;
                 while (*ptr && *ptr != ' ') ptr++;
                 *ptr = '\0';
-                volumes[i].mnt = pcs_utils_strdup(start);
+                volumes[i].mnt = pcs_malloc(ptr - start + 2);
+
+                assert(volumes[i].mnt != NULL);
+
+                snprintf(volumes[i].mnt, ptr - start + 2, "%s/", start);                
+
                 *ptr = ' ';
 
                 i++;
@@ -151,7 +156,7 @@ static int task_mnt_init(task_mnt_t **mnt)
     }
 
     volume_cnt = 1;
-    volumes[0].mnt = pcs_utils_strdup("/home/michael");
+    volumes[0].mnt = pcs_utils_strdup("/home/michael/");
     volumes[0].dev = pcs_utils_strdup("/dev/xxxx");
 #endif    
 
@@ -176,10 +181,36 @@ static int task_mnt_init(task_mnt_t **mnt)
     return volume_cnt;
 }
 
-static int task_db_restore(struct task_list *task_list, task_mnt_t *mnt)
+static int task_db_open(task_mnt_t *mnt)
 {
+    //try to open db
     char path[4096];
     int err;
+    sqlite3 *db_ptr = NULL;
+    int ret;
+    
+    snprintf(path, sizeof(path), "%s%s", mnt->mnt, ".pcs/pcs.db");
+    
+    pcs_log("try to open db %s\n", path);
+
+    if (access(path, R_OK | W_OK) == -1) {
+        err = errno;
+        pcs_log("access file failed, %s %s\n", path, strerror(err));
+        return -1;
+    }
+
+    if ((ret = sqlite3_open(path, &db_ptr)) != SQLITE_OK) {
+        pcs_log("open sqlite db failed, %s\n", path);
+        return -1;
+    }
+
+    mnt->db = db_ptr;
+
+    return 0; 
+}
+
+static int task_db_restore(struct task_list *task_list, task_mnt_t *mnt)
+{
     sqlite3 *db = NULL;
     int ret;
     sqlite3_stmt *stmt = NULL;
@@ -195,20 +226,12 @@ static int task_db_restore(struct task_list *task_list, task_mnt_t *mnt)
 
     pcs_log("try to restore tasks on: %s\n", mnt->mnt);
 
-    snprintf(path, sizeof(path), "%s/%s", mnt->mnt, ".pcs/pcs.db");
-
-    if (access(path, R_OK | W_OK) == -1) {
-        err = errno;
-        pcs_log("access file failed, %s %s\n", path, strerror(err));
+    if ((ret = task_db_open(mnt)) != 0) {
+        pcs_log("open sqlite db failed, %s\n", mnt->mnt);
         return -1;
     }
 
-    if ((ret = sqlite3_open(path, &db)) != SQLITE_OK) {
-        pcs_log("open sqlite db failed, %s\n", path);
-        return -1;
-    }
-
-    mnt->db = db;
+    db = mnt->db;
 
     char *sql = "SELECT lpath, rpath, rmd5, size, status, download_ts FROM task WHERE status == ? OR status == ?";
 
@@ -354,7 +377,7 @@ int task_db_create(task_mnt_t *mnt)
     int ret = 0;
     char *errmsg = NULL;
 
-    snprintf(path, sizeof(path), "%s/%s", mnt->mnt, ".pcs/pcs.db");
+    snprintf(path, sizeof(path), "%s%s", mnt->mnt, ".pcs/pcs.db");
 
     pcs_log("try to create db %s\n", path);
 
@@ -507,28 +530,14 @@ int task_db_update(struct task_list *task_list, struct task *task)
 
     if (task->mnt->db == NULL) {
         //try to open db
-        char path[4096];
-        int err;
-        
-        snprintf(path, sizeof(path), "%s/%s", task->mnt->mnt, ".pcs/pcs.db");
-        
-        pcs_log("try to open db %s\n", path);
 
-        if (access(path, R_OK | W_OK) == -1) {
-            err = errno;
-            pcs_log("access file failed, %s %s\n", path, strerror(err));
+        if ((ret = task_db_open(task->mnt)) != 0) {
+            pcs_log("open sqlite db failed, %s\n", task->mnt->mnt);
             return -1;
-        }
-
-        if ((ret = sqlite3_open(path, &db)) != SQLITE_OK) {
-            pcs_log("open sqlite db failed, %s\n", path);
-            return -1;
-        }
-
-        task->mnt->db = db;      
-    } else {
-        db = task->mnt->db;
+        } 
     }
+
+    db = task->mnt->db;
 
     pcs_log("update a record, %s\n", task->lpath);
 
@@ -676,4 +685,141 @@ int task_db_complete_task_get(struct task_list *task_list, struct task_info_list
     return cnt;
 }
 
+int task_db_check_exist(task_mnt_t *mnt, const char *lpath)
+{
+    sqlite3 *db = NULL;
+    int ret;
+    sqlite3_stmt *stmt = NULL;
+    int rc = 0;
+
+    pcs_log("try to check task in db %s\n", lpath);
+
+    char *sql = "SELECT status FROM task WHERE lpath == ?";
+
+    if (strncmp(lpath, mnt->mnt, mnt->mnt_len) != 0) {
+        return 0;
+    }
+
+    if (mnt->db == NULL) {
+        //try to open db
+        if ((ret = task_db_open(mnt)) != 0) {
+            //open db faild
+            return 0;
+        }
+    }
+
+    db = mnt->db;
+
+    ret = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (ret != SQLITE_OK) {
+        pcs_log("sqlite3_prepare failed, ret = %d, %s\n", ret, sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_text(stmt, 1, lpath + mnt->mnt_len, -1, SQLITE_STATIC);
+
+    rc = 0;
+    if ((ret = sqlite3_step(stmt)) == SQLITE_ROW) {
+        rc = 1;
+    }
+
+    sqlite3_finalize(stmt);
+
+    return rc;
+}
+
+int task_db_del_by_lpath(task_mnt_t *mnt, const char *lpath)
+{
+    sqlite3 *db = NULL;
+    int ret;
+    sqlite3_stmt *stmt = NULL;
+    int rc = 0;
+
+    char *sql = "DELETE FROM task WHERE lpath == ?";
+
+    pcs_log("try to del task, %s\n", lpath);
+
+    if (strncmp(lpath, mnt->mnt, mnt->mnt_len) != 0) {
+        return 0;
+    }    
+
+    if (mnt->db == NULL) {
+        //try to open db
+        if ((ret = task_db_open(mnt)) != 0) {
+            //open db faild
+            return 0;
+        }
+    }
+
+    db = mnt->db;
+
+    ret = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (ret != SQLITE_OK) {
+        pcs_log("sqlite3_prepare failed, ret = %d, %s\n", ret, sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_text(stmt, 1, lpath + mnt->mnt_len, -1, SQLITE_STATIC);
+
+    rc = -1;
+    if ((ret = sqlite3_step(stmt)) == SQLITE_DONE) {
+        pcs_log();
+        rc = 0;
+    }
+
+    sqlite3_finalize(stmt);
+
+    return rc;
+}
+
+
+/**
+ * 递归创建目录
+ * @param dir 目录名称，所有路径都认为是目录
+ */
+int create_dir_r(const char *dir)
+{
+	char path[4096];
+	char *ptr = NULL;
+	char old = 0;
+	int err = 0;
+
+	if (!dir || *dir != '/') {
+		return -1;
+	}
+
+	memset(path, 0, sizeof(path));
+
+	strncpy(path, dir, sizeof(path) - 1);
+
+	ptr = path + 1;
+
+    while (*ptr) {
+        while (*ptr && *ptr != '/') ptr++;
+        if (*ptr == '/' || *ptr == '\0') {
+            old = *ptr;
+            *ptr = '\0';
+            //printf("check path [%s]\n", path);
+            if (access(path, F_OK) == -1) {
+                /* do not exist, attemp to create it */
+                printf("create dir [%s]\n", path);
+                if (mkdir(path, S_IRWXU | S_IRWXG | S_IRWXO ) == -1) {
+                    err = errno;
+                    if (err != EEXIST) {
+                        printf("mkdir: mkdir failed, %s, %s\n", path, strerror(err));
+                        return -1;
+                    }
+                }
+            }
+
+            if(old == '/') {
+                *ptr++ = '/';  /* restore */
+            } else {
+                return 0;
+            }
+        }
+	}
+
+	return 0;
+}
 

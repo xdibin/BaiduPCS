@@ -10,6 +10,8 @@
 
 #include "cJSON.h"
 
+#include "utils.h"
+
 #include "dispatch.h"
 #include "utils_print.h"
 #include "error_code.h"
@@ -539,7 +541,7 @@ static int callback_download(HttpContext *context)
 
 	int lpath_len = 0;
 
-	int err = 0;
+
 	int ret = ERRCODE_UNKNOWN;
 
 	int64_t length = 0;
@@ -646,6 +648,7 @@ static int callback_download(HttpContext *context)
 
 	snprintf(lpath, lpath_len, "%s/%s", ldir, lname);
 
+#if 0
 	struct stat st;
 	if (stat(ldir, &st) == -1) {
 		err = errno;
@@ -718,6 +721,12 @@ static int callback_download(HttpContext *context)
 	}
 
 	lpath[lpath_len] = '\0'; // restore the lpath name
+#endif
+	//检查是否存在相同下载记录
+	if (task_check_exist(lpath, force) != 0) {
+		ret = ERRCODE_LOCAL_FILE;
+		goto download_out;
+	}
 
 	pcs_log("rpath = %s, lpath = %s\n", rpath, lpath);
 
@@ -761,7 +770,7 @@ download_out:
  *
  * @return 
  */
-static int callback_task(HttpContext *context)
+static int callback_tasklist(HttpContext *context)
 {
 	task_info_list_t *list = NULL;
 	task_info_list_t *list_head = NULL;
@@ -880,11 +889,128 @@ static int callback_task(HttpContext *context)
 
 	task_info_list_free(list_head);
 
-	pcs_log("task response len = %d is \n%s\n", len, json);
+	pcs_log("tasklist response len = %d is \n%s\n", len, json);
 
 	http_response_by_xhttpd(context, json, len);
 
 	pcs_free(json);
+
+	return 0;
+}
+
+/**
+ * @brief 删除下载任务列表
+ *
+ * @return 
+ */
+static int callback_taskdel(HttpContext *context)
+{
+	char *lpath = NULL;
+
+	cJSON *root = NULL;
+	cJSON *array = NULL;
+	cJSON *list = NULL;
+	cJSON *item = NULL;
+	int array_size = 0;	
+
+	struct _taskdelresult {
+		char *lpath;
+		int rc;
+	};
+
+	struct _taskdelresult *results = NULL;
+	char *json = NULL;
+	int i = 0;
+
+
+	xhttpd_http_t *xhttp = (xhttpd_http_t *)(context->http);
+	if (!xhttp || xhttp->method != XHTTPD_METHOD_POST || !(xhttp->content) || xhttp->content_len <= 0) {
+		pcs_log("must post and json context\n");
+		return ERRCODE_ARG;
+	}
+
+	root = cJSON_Parse(xhttp->content);
+	if (!root) {
+		pcs_log("parse json failed, %s\n", xhttp->content);
+		return ERRCODE_ARG;
+	}
+
+	array = cJSON_GetObjectItem(root, "list");
+	if (!array && array->type != cJSON_Array) {
+		cJSON_Delete(root);
+		return ERRCODE_ARG;
+	}
+
+	array_size = cJSON_GetArraySize(array);
+
+	if (array_size <= 0) {
+		cJSON_Delete(root);
+		return ERRCODE_ARG;
+	}
+
+	results = pcs_malloc(sizeof(struct _taskdelresult) * array_size);
+	if (!results) {
+		cJSON_Delete(root);
+		return ERRCODE_MEMORY;		
+	}
+
+	memset(results, 0, sizeof(struct _taskdelresult) * array_size);
+
+	int json_size = array_size * 4096;
+	int json_len = 0;
+
+	json = pcs_malloc(json_size);
+	if (!json) {
+		pcs_free(results);
+		cJSON_Delete(root);
+		return ERRCODE_MEMORY;
+	}
+
+	memset(json, 0, json_size);	
+
+	for (list = array->child, i = 0; list; list = list->next, i++) {
+		lpath = NULL;
+
+		item = cJSON_GetObjectItem(list, "lpath");
+		if (item && item->type == cJSON_String && item->valuestring && *(item->valuestring)) {
+			lpath = pcs_utils_strdup(item->valuestring);
+		}
+
+		pcs_log("try to del task %s\n", lpath);
+
+		results[i].lpath = lpath;
+		if (lpath) {
+			results[i].rc = task_del(lpath);
+		} else {
+			results[i].rc = 0;
+		}
+	}
+
+	cJSON_Delete(root);
+
+	json_len = snprintf(json, json_size, "{\"errno\":0,\"list\":[");
+
+	for (i = 0; i < array_size; i++) {
+		json_len += snprintf(json + json_len, json_size - json_len, "{\"lpath\":\"%s\",\"result\":%d},",
+			results[i].lpath ? results[i].lpath : "", results[i].rc
+		);
+
+		if (results[i].lpath) pcs_free(results[i].lpath); results[i].lpath = NULL;
+	}
+
+	if (json[json_len - 1] == ',') {
+		json[json_len - 1] = '\0';
+		json_len--;
+	}
+
+	json_len += snprintf(json + json_len, json_size - json_len, "]}");
+
+	pcs_log("taskdel response len = %d is \n%s\n", json_len, json);
+
+	http_response_by_xhttpd(context, json, json_len);	
+
+	pcs_free(json);
+	pcs_free(results);
 
 	return 0;
 }
@@ -917,7 +1043,8 @@ static const DispatchTable dispatch_table[] = {
 	{ "meta",		callback_meta 		},
 	{ "quota",		callback_quota	 	},
 	{ "download",	callback_download	},
-	{ "task",		callback_task       }
+	{ "tasklist",	callback_tasklist   },
+	{ "taskdel",	callback_taskdel    }
 };
 
 /**

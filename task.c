@@ -827,7 +827,7 @@ static int task_exit(task_t *task)
     task->next->prev = task->prev;
 
     g_task_list->run_cnt--;
-
+    
     TASK_UNLOCK_SURE();
 
     pcs_free(task);
@@ -1332,6 +1332,7 @@ static void *task_thread(void *param)
 }
 
 
+
 static int task_thread_start(task_t *task)
 {
     pthread_attr_t attr;
@@ -1421,23 +1422,27 @@ static int task_add_internal(void *context, const task_t *task_ref, int need_ins
     g_task_list->run.prev->next = task;
     g_task_list->run.prev = task;
 
-    g_task_list->run_cnt++;
-
-    TASK_UNLOCK_SURE();
-
     if (need_insert_db) {
         ret = task_db_add(g_task_list, task);
-        if (ret == -1) {
+        if (ret == -1) {            
+            TASK_UNLOCK_SURE();            
             pcs_log("add task to db failed\n");
+            task_exit(task);
             return -1;
         }        
     } else {
         ret = task_db_mnt_set(g_task_list, task);
         if (ret == -1) {
+            TASK_UNLOCK_SURE();
             pcs_log("set task mnt failed\n");
+            task_exit(task);
             return -1;
         } 
     }
+
+    g_task_list->run_cnt++;
+
+    TASK_UNLOCK_SURE();
 
     if (task->status == TASK_STATUS_INIT ||
         task->status == TASK_STATUS_DOWNLOADING) {
@@ -1495,8 +1500,65 @@ int task_add(void *context, char *rpath, char *rmd5,
  *
  * 
  */
-int task_del()
+int task_del(const char *lpath)
 {
+    int ret = 0;
+    int err = 0;
+    char path[4096];
+
+    if (!lpath || *lpath != '/') {
+        return -1;
+    }
+
+    //检查本地是否存在，下载完成或者未完成（临时文件和CFG文件）
+    task_mnt_t *mnt = g_task_list->dev->mnts;
+    int i;
+
+	for (i = 0; i < g_task_list->dev->mnt_cnt; i++) {
+        mnt = g_task_list->dev->mnts + i;
+        if (strncmp(mnt->mnt, lpath, mnt->mnt_len) == 0) {
+            //找到对应的挂载分区了
+            break;
+        }
+    }
+
+    if (i >= g_task_list->dev->mnt_cnt) {
+        //没有找到分区，可能用户指定了一个错误的本地路径
+        pcs_log("local path is not mounted %s\n", lpath);
+        return ERRCODE_LOCAL_FILE;
+    }
+
+    ret = access(lpath, F_OK);
+    if (ret == 0) {
+        //尝试删除
+        pcs_log("try to del task %s\n", lpath);
+        unlink(lpath);
+    } else {
+        err = errno;
+        if (err != ENOENT) {
+            pcs_log("access file failed, %s\n", lpath);
+        }
+    }
+
+    snprintf(path, sizeof(path), "%s%s", lpath, TASK_FILE_TMP_EXT_NAME);
+    ret = access(path, F_OK);
+    if (ret == 0) {
+        //尝试删除
+        pcs_log("try to del task temp file %s\n", path);
+        unlink(path);
+    }
+
+    snprintf(path, sizeof(path), "%s%s.cfg", lpath, TASK_FILE_TMP_EXT_NAME);
+    ret = access(path, F_OK);
+    if (ret == 0) {
+        //尝试删除
+        pcs_log("try to del task cfg file %s\n", path);
+        unlink(path);
+    }
+    
+    //检查数据库中是否存在记录
+    pcs_log("try to del task db record %s\n", lpath);
+    task_db_del_by_lpath(mnt, lpath);
 
      return 0;
 }
@@ -1748,3 +1810,133 @@ int task_info_complete_list_get(task_info_list_t **list)
 
     return cnt;
 }
+
+
+int task_check_exist(const char *lpath, int force)
+{
+    char path[4096];
+    char *ldir = NULL;
+    char *ptr = NULL;
+    int err;
+    int ret;
+
+    if (!lpath) {
+        return -1;
+    }
+
+    pcs_log("check task exist or not , %s\n", lpath);
+
+	//检查是否存在下载记录
+
+    task_mnt_t *mnt = g_task_list->dev->mnts;
+    int i;
+
+	for (i = 0; i < g_task_list->dev->mnt_cnt; i++) {
+        mnt = g_task_list->dev->mnts + i;
+        if (strncmp(mnt->mnt, lpath, mnt->mnt_len) == 0) {
+            //找到对应的挂载分区了
+            break;
+        }
+    }
+
+    if (i >= g_task_list->dev->mnt_cnt) {
+        //没有找到分区，可能用户指定了一个错误的本地路径
+        pcs_log("local path is not mounted %s\n", lpath);
+        return ERRCODE_LOCAL_FILE;
+    }
+
+    memset(path, 0, sizeof(path));
+    int lpath_len = snprintf(path, sizeof(path), "%s", lpath);
+
+    if (lpath_len + sizeof(TASK_FILE_TMP_EXT_NAME) + 2 >= 4069) {
+        pcs_log("lpath is too long, %d\n", lpath_len);
+        return ERRCODE_LOCAL_FILE;
+    }
+
+    ptr = strrchr(path, '/');
+    assert(ptr != NULL);
+
+    *ptr = '\0';
+    ldir = path;
+
+	struct stat st;
+    pcs_log("check local dir exist or not %s\n", ldir);
+	if (stat(ldir, &st) == -1) {
+		err = errno;
+		if (err != ENOENT) {
+			pcs_log("stat ldir failed, %s, %s\n", ldir, strerror(err));
+            return ERRCODE_LOCAL_FILE;
+		} else {
+			/* create the dir */
+			pcs_log("dir not exist, try to create it, %s\n", ldir);
+            if (create_dir_r(ldir) != 0) {
+                return ERRCODE_LOCAL_FILE;
+            }
+		}
+	} else {
+		if (!S_ISDIR(st.st_mode)) {
+			/* not a dir */
+            return ERRCODE_LOCAL_FILE;
+		}
+	}
+
+    *ptr = '/';
+    pcs_log("check local file exist or not, %s\n", path);
+	if (stat(path, &st) == 0) {
+		if (!S_ISREG(st.st_mode)) {
+			/* not a file */
+            return ERRCODE_LOCAL_FILE;
+		} else {
+			/* check force overwrite flag is set or not ? */
+			if (force == 0) {
+				pcs_log("file exist but force/overwrite is not set!\n");
+                return ERRCODE_LOCAL_FILE;
+			} else {
+				/* remove the local file */
+				unlink(path);
+				if (access(path, F_OK) == 0) {
+                    return ERRCODE_LOCAL_FILE;
+				}
+			}
+		}
+	}
+
+	/* 检查是否存在临时文件 */
+	strcpy(path + lpath_len, TASK_FILE_TMP_EXT_NAME);
+    pcs_log("check temp file exist or not %s\n", path);
+	if (stat(path, &st) == 0) {
+		if (!S_ISREG(st.st_mode)) {
+			/* not a file */
+			return ERRCODE_LOCAL_FILE;
+		} else {
+			/* check force overwrite flag is set or not ? */
+			if (force == 0) {
+				pcs_log("file exist but force/overwrite is not set!\n");
+				return ERRCODE_LOCAL_FILE;
+			} else {
+				/* remove the local file */
+				unlink(path);
+				if (access(path, F_OK) == 0) {
+					return ERRCODE_LOCAL_FILE;
+				}
+			}
+		}
+	}
+
+	path[lpath_len] = '\0'; // restore the lpath name
+
+    //检查数据库
+    pcs_log("check db record exist or not %s\n", lpath);
+    if ((ret = task_db_check_exist(mnt, lpath)) == 1) {
+        if (force) {
+            //删除掉
+            pcs_log("delete record form db %s\n", lpath);
+            task_db_del_by_lpath(mnt, lpath);
+        } else {
+            return ERRCODE_LOCAL_FILE;
+        }
+    }
+
+    return 0;
+}
+
