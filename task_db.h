@@ -37,12 +37,18 @@ int task_db_del(struct task_list *task_list, struct task *task);
 
 int task_db_update(struct task_list *task_list, struct task *task);
 
-int task_db_complete_task_get(struct task_list *task_list, struct task_info_list **info_list);
+int task_db_info_list_get_by_status(
+    struct task_list *task_list, 
+    struct task_info_list **info_list_head,
+    struct task_info_list **info_list_tail,
+    int status);
 
 int task_db_check_exist(task_mnt_t *mnt, const char *lpath);
 
 int task_db_del_by_lpath(task_mnt_t *mnt, const char *lpath);
 
 int create_dir_r(const char *dir);
+
+int task_db_get_by_lpath(struct task_list *task_list, const char *lpath, struct task **task);
 
 #endif

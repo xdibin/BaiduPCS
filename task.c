@@ -391,18 +391,20 @@ static size_t task_head_recv_callback(char *buffer, size_t size, size_t nmemb, v
 
      /* 转换状态码 */
      http_code = atoi(start);
+     pcs_log("http code is %d\n", http_code);
+     subtask->http_code = http_code;
 
      if (http_code < 200 || http_code >= 300) {
          /* 服务器返回出错了，为了得到服务器返回的数据，还是要让curl继续收数据，然后在write callback中处理错误 */
          pcs_log("server response error, http code %d\n", http_code);
-         subtask->status = TASK_STATUS_REMOTE_ERROR;         
+         subtask->status = TASK_STATUS_REMOTE_ERROR;
+         /* 经常会收到302的返回值 */
+         subtask->task->status = TASK_STATUS_REMOTE_ERROR;
+
+         return 0;
      } else {
          subtask->status = TASK_STATUS_DOWNLOADING;
      }
-
-     subtask->http_code = http_code;
-
-     pcs_log("http code is %d\n", http_code);
 
     return recv_size;
 }
@@ -428,7 +430,8 @@ static size_t task_file_write_callback(char *buffer, size_t size, size_t nmemb, 
 
     size_t recv_size = size * nmemb;
 
-    if (!g_pcs_running || subtask->task->status == TASK_STATUS_STOP) {
+    if (!g_pcs_running || 
+        subtask->task->status == TASK_STATUS_STOP) {
         pcs_log("task is stopping\n");
         return 0;
     }
@@ -733,27 +736,17 @@ static int task_exit(task_t *task)
         return -1;
     }
 
+    task_summary_show(task); 
+
     if (task->file && task->file->fd > 0) {
         fsync(task->file->fd);
         close(task->file->fd);
         task->file->fd = -1;
-    }
-
-    task_summary_show(task);    
+    }       
 
     if (task->url) {
         pcs_free(task->url);
         task->url = NULL;
-    }
-
-    if (task->rpath) {
-        pcs_free(task->rpath);
-        task->rpath = NULL;
-    }
-
-    if (task->lpath) {
-        pcs_free(task->lpath);
-        task->lpath = NULL;
     }
 
     if (task->lpath_tmp) {
@@ -785,6 +778,19 @@ static int task_exit(task_t *task)
         task->file = NULL;
     }
 
+    if (task->buffer) {
+        pcs_free(task->buffer);
+        task->buffer = NULL;
+    }
+
+    if (task->cfg_name) {
+        pcs_free(task->cfg_name);
+        task->cfg_name = NULL;
+    }
+
+    TASK_LOCK_SURE();
+
+    //将所有其他线程会访问到的字段，放到锁内，保护起来
     if (task->subtask) {
         int i = 0;
         for (i = 0; i < task->subtask_cnt; i++) {
@@ -806,31 +812,30 @@ static int task_exit(task_t *task)
         task->cm = NULL;
     }
 
-    if (task->buffer) {
-        pcs_free(task->buffer);
-        task->buffer = NULL;
-    }
 
     if (task->tid) {
         pcs_free(task->tid);
         task->tid = NULL;
     }
 
-    if (task->cfg_name) {
-        pcs_free(task->cfg_name);
-        task->cfg_name = NULL;
-    }    
+    if (task->rpath) {
+        pcs_free(task->rpath);
+        task->rpath = NULL;
+    }
 
-    TASK_LOCK_SURE();
+    if (task->lpath) {
+        pcs_free(task->lpath);
+        task->lpath = NULL;
+    }    
 
     task->prev->next = task->next;
     task->next->prev = task->prev;
 
     g_task_list->run_cnt--;
     
-    TASK_UNLOCK_SURE();
-
     pcs_free(task);
+
+    TASK_UNLOCK_SURE();
 
     return 0;
 }
@@ -1299,7 +1304,7 @@ static int task_loop(task_t *task)
             ts_3 = ts_4;
             dl_cnt = task->download_size;
         }
-    } while (still_running && task->status != TASK_STATUS_STOP);
+    } while (still_running && (task->status == TASK_STATUS_DOWNLOADING) );
 
     time(&ts_2);
     
@@ -1564,23 +1569,64 @@ int task_del(const char *lpath)
 }
 
 /**
- * @brief 暂停一个任务
- *
+ * @brief 停止一个任务
+ * 从g_task_list中找到任务，并设置任务的状态为stop
+ * 
+ * 任务下载线程，检查到其状态为stop后，会结束下载，并将最终的下载进度，状态等信息写入到cfg文件和数据库
+ * 然后清理掉所有下载资源，并将自身从g_task_list中删除掉
  */
-int task_pause()
+int task_stop(const char *lpath)
 {
-  
-     return 0;
+    if (!lpath || !*lpath) {
+        return ERRCODE_ARG;
+    }
+
+    task_t *task = NULL;
+    int ret = -1;
+
+    TASK_LOCK_SURE();
+
+    task = g_task_list->run.next;
+
+    while (task != &(g_task_list->run)) {
+        if (strcmp(task->lpath, lpath) == 0) {
+            pcs_log("signal the task to stop, %s\n", lpath);
+            task->status = TASK_STATUS_STOP;
+            ret = 0;
+            break;
+        }
+
+        task = task->next;
+    }
+
+    TASK_UNLOCK_SURE();
+
+     return ret;
 }
 
 /**
  * @brief 恢复一个任务
+ * 从数据库中将任务提取出来，然后加入到下载队列中
  *
  */
-int task_resume()
+int task_resume(void *context, const char *lpath)
 {
+    task_t *task = NULL;
+    int ret = -1;
 
-     return 0;
+    HttpContext *http_context = (HttpContext *)context;
+
+    if ((ret = task_db_get_by_lpath(g_task_list, lpath, &task)) == -1) {
+        pcs_log("get task failed, %s\n", lpath);
+        return -1;
+    } else if (ret == 0){
+        pcs_log("not found task %s\n", lpath);
+        return -1;
+    }
+
+    task->status = TASK_STATUS_DOWNLOADING;
+
+    return task_restore(http_context, task->rpath, task->rmd5, task->total_size, task->lpath, task->status, task->download_ts);
 }
 
 
@@ -1589,6 +1635,17 @@ static int task_info_list_cmp_start_ts(task_info_list_t *a, task_info_list_t *b)
     if (a->start_ts > b->start_ts) {
         return 1;
     } else if (a->start_ts < b->start_ts) {
+        return -1;
+    } else {
+        return 0;
+    }
+}
+
+static int task_info_list_cmp_complete_ts(task_info_list_t *a, task_info_list_t *b)
+{
+    if (a->complete_ts > b->complete_ts) {
+        return 1;
+    } else if (a->complete_ts < b->complete_ts) {
         return -1;
     } else {
         return 0;
@@ -1664,7 +1721,8 @@ static task_info_list_t *task_info_list_node_get_and_remove(
  * 按时间排序
  * 采用插入排序算法
  */
-static int task_info_list_sort_by_time(task_info_list_t **list, int ascending)
+static int task_info_list_sort_by_time(task_info_list_t **list, int ascending,
+    int (*task_info_list_cmp_func)(task_info_list_t *a, task_info_list_t *b))
 {
     task_info_list_t *head = NULL;
     task_info_list_t *tail = NULL;
@@ -1673,7 +1731,7 @@ static int task_info_list_sort_by_time(task_info_list_t **list, int ascending)
     task_info_list_t **list_head = list;
 
     while (*list_head) {
-        getted = task_info_list_node_get_and_remove(list_head, !ascending, task_info_list_cmp_start_ts);
+        getted = task_info_list_node_get_and_remove(list_head, !ascending, task_info_list_cmp_func);
 
         if (getted == NULL) {
             break;
@@ -1703,7 +1761,9 @@ int task_info_list_sort(task_info_list_t **list, enum task_info_list_sort_order 
 
     switch (order) {
     case TASK_INFO_LIST_SORT_ORDER_TIME:
-        return task_info_list_sort_by_time(list, ascending);
+        return task_info_list_sort_by_time(list, ascending, task_info_list_cmp_start_ts);
+    case TASK_INFO_LIST_SORT_ORDER_COMPLETE_TIME:
+        return task_info_list_sort_by_time(list, ascending, task_info_list_cmp_complete_ts);
     default:
         pcs_log("order is error, %d\n", order);
         return -1;
@@ -1801,16 +1861,64 @@ int task_info_complete_list_get(task_info_list_t **list)
     }
 
     task_info_list_t *list_head = NULL;
+    task_info_list_t *list_tail = NULL;
     int cnt = 0;
 
     /* 已完成任务保存到数据库了，内存中没有 */
-    cnt = task_db_complete_task_get(g_task_list, &list_head);
+    cnt = task_db_info_list_get_by_status(g_task_list, &list_head, &list_tail, TASK_STATUS_COMPLETE);
 
     *list = list_head;
 
     return cnt;
 }
 
+int task_info_stop_list_get(task_info_list_t **list)
+{
+    if (g_task_list == NULL || !list) {
+        return -1;
+    }
+
+    task_info_list_t *list_head = NULL;
+    task_info_list_t *list_tail = NULL;
+    int cnt = 0;
+
+    /* 已完成任务保存到数据库了，内存中没有 */
+    cnt = task_db_info_list_get_by_status(g_task_list, &list_head, &list_tail, TASK_STATUS_STOP);
+
+    *list = list_head;
+
+    return cnt;
+}
+
+int task_info_error_list_get(task_info_list_t **list)
+{
+    if (g_task_list == NULL || !list) {
+        return -1;
+    }
+
+    int cnt_r = 0;
+    int cnt_l = 0;
+    int cnt_n = 0;
+
+    task_info_list_t *head = NULL;
+    task_info_list_t *tail = NULL;   
+    int cnt = 0;
+
+    /* 已完成任务保存到数据库了，内存中没有 */
+    cnt_r = task_db_info_list_get_by_status(g_task_list, &head, &tail, TASK_STATUS_REMOTE_ERROR);
+
+    cnt_l = task_db_info_list_get_by_status(g_task_list, &head, &tail, TASK_STATUS_LOCAL_ERROR);
+
+    cnt_n = task_db_info_list_get_by_status(g_task_list, &head, &tail, TASK_STATUS_NETWORK_ERROR);
+
+    if (cnt_r > 0) cnt += cnt_r;
+    if (cnt_l > 0) cnt += cnt_l;
+    if (cnt_n > 0) cnt += cnt_n;
+
+    *list = head;
+
+    return cnt;
+}
 
 int task_check_exist(const char *lpath, int force)
 {
@@ -1940,3 +2048,31 @@ int task_check_exist(const char *lpath, int force)
     return 0;
 }
 
+/**
+ * 同步目录
+ * 1. 递归获取网盘上rpath下所有的文件
+ * 2. 依次将文件加入到下载队列
+ * 3. 下载文件
+ * 如果服务器上面的目录层级太深，会导致查询非耗时，显然阻塞住http线程，不是一个友好的做法
+ * 因此查询请求，在一个子线程里面来做
+ * 不使用递归的方式查询服务器目录和文件，而使用广度优先算法，依次将查询到的目录和文件压入队列，
+ * 扫描完一层目录后，再将队列里面的目录取出，继续上面的扫描过程，直到队列里面没有目录了才结束扫描
+ * 等所有文件扫描完毕后，再对队列里面的元素进行下载
+ * 
+ */
+int task_sync(void *context, const char *rpath, const char *lpath)
+{
+    if (!context || !rpath || !*rpath || !lpath || !*lpath) {
+        return ERRCODE_ARG;
+    }
+
+    HttpContext *http_context = (HttpContext *)context;
+
+    pcs_log("try to sync rpath %s --> lpath %s\n", rpath, lpath);
+
+    //FIXME: 待完善
+
+
+
+    return 0;
+}

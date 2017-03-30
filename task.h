@@ -34,11 +34,12 @@ typedef enum task_status {
     TASK_STATUS_INIT = 1,
     TASK_STATUS_DOWNLOADING = 2,
     TASK_STATUS_COMPLETE =3 ,
-    TASK_STATUS_PAUSE = 4,
-    TASK_STATUS_STOP = 5,
-    TASK_STATUS_REMOTE_ERROR = 6,
-    TASK_STATUS_LOCAL_ERROR = 7,
-    TASK_STATUS_NETWORK_ERROR = 8,    
+    TASK_STATUS_STOP = 4,
+    TASK_STATUS_REMOTE_ERROR = 5,
+    TASK_STATUS_LOCAL_ERROR = 6,
+    TASK_STATUS_NETWORK_ERROR = 7,
+
+    TASK_STATUS_MAX
 } task_status_t;
 
 
@@ -52,7 +53,8 @@ enum task_subtask_type {
 
 enum task_info_list_sort_order {
     TASK_INFO_LIST_SORT_ORDER_NONE = -1,
-    TASK_INFO_LIST_SORT_ORDER_TIME,
+    TASK_INFO_LIST_SORT_ORDER_TIME = 0,
+    TASK_INFO_LIST_SORT_ORDER_COMPLETE_TIME = 1,
 
     TASK_INFO_LIST_SORT_ORDER_MAX
 };
@@ -190,6 +192,8 @@ int task_info_run_list_get(task_info_list_t **list);
 
 int task_info_complete_list_get(task_info_list_t **list);
 
+int task_info_stop_list_get(task_info_list_t **list);
+
 int task_info_list_free(task_info_list_t *list);
 
 int task_info_list_sort(task_info_list_t **list, enum task_info_list_sort_order order, int ascending);
@@ -197,6 +201,12 @@ int task_info_list_sort(task_info_list_t **list, enum task_info_list_sort_order 
 int task_check_exist(const char *lpath, int force);
 
 int task_del(const char *lpath);
+
+int task_sync(void *context, const char *rpath, const char *lpath);
+
+int task_stop(const char *lpath);
+
+int task_resume(void *context, const char *lpath);
 
 #endif
 

@@ -145,6 +145,8 @@ static int callback_login(HttpContext *context)
 
 	pcs_cookie_flush(context->pcs);
 
+	context->is_login = 1;
+
 	char buf[512];
 	int len = 0;
 
@@ -190,6 +192,8 @@ static int callback_logout(HttpContext *context)
 	}
 
 	pcs_log("Logout Success.\n");
+
+	context->is_login = 0;
 
 	pcs_cookie_flush(context->pcs);
 
@@ -648,80 +652,6 @@ static int callback_download(HttpContext *context)
 
 	snprintf(lpath, lpath_len, "%s/%s", ldir, lname);
 
-#if 0
-	struct stat st;
-	if (stat(ldir, &st) == -1) {
-		err = errno;
-		if (err != ENOENT) {
-			pcs_log("stat ldir failed, %s, %s\n", ldir, strerror(err));
-			ret = ERRCODE_LOCAL_FILE;
-			goto download_out;
-		} else {
-			/* create the dir */
-			pcs_log("dir not exist\n");
-			ret = ERRCODE_LOCAL_FILE;
-			goto download_out;
-		}
-	} else {
-		if (!S_ISDIR(st.st_mode)) {
-			/* not a dir */
-			ret = ERRCODE_LOCAL_FILE;
-			goto download_out;
-		}
-	}
-
-	pcs_free(ldir);
-	ldir = NULL;
-
-	if (stat(lpath, &st) == 0) {
-		if (!S_ISREG(st.st_mode)) {
-			/* not a file */
-			ret = ERRCODE_LOCAL_FILE;
-			goto download_out;
-		} else {
-			/* check force overwrite flag is set or not ? */
-			if (force == 0) {
-				pcs_log("file exist but force/overwrite is not set!\n");
-				ret =  ERRCODE_LOCAL_FILE;
-				goto download_out;
-			} else {
-				/* remove the local file */
-				unlink(lpath);
-				if (access(lpath, F_OK) == 0) {
-					ret =  ERRCODE_LOCAL_FILE;
-					goto download_out;
-				}
-			}
-		}
-	}
-
-	/* 检查是否存在临时文件 */
-	lpath_len = strlen(lpath);
-	strcpy(lpath + lpath_len, ".tmp");
-	if (stat(lpath, &st) == 0) {
-		if (!S_ISREG(st.st_mode)) {
-			/* not a file */
-			ret = ERRCODE_LOCAL_FILE;
-			goto download_out;
-		} else {
-			/* check force overwrite flag is set or not ? */
-			if (force == 0) {
-				pcs_log("file exist but force/overwrite is not set!\n");
-				ret =  ERRCODE_LOCAL_FILE;
-				goto download_out;
-			} else {
-				/* remove the local file */
-				unlink(lpath);
-				if (access(lpath, F_OK) == 0) {
-					ret =  ERRCODE_LOCAL_FILE;
-					goto download_out;
-				}
-			}
-		}
-	}
-
-	lpath[lpath_len] = '\0'; // restore the lpath name
-#endif
 	//检查是否存在相同下载记录
 	if (task_check_exist(lpath, force) != 0) {
 		ret = ERRCODE_LOCAL_FILE;
@@ -809,8 +739,8 @@ static int callback_tasklist(HttpContext *context)
 	if (page_str) i4_page = atoi(page_str);
 	if (num_str) i4_num = atoi(num_str);
 
-	if ((i4_category != 0 && i4_category != 1) ||
-		(i4_order != 0) ||
+	if ((i4_category < 0 || i4_category > 3) ||
+		((i4_order != 0 && i4_order != 1) || (i4_order == 1 && i4_category != 1 )) ||
 		(i4_asc != 0 && i4_asc != 1) ||
 		(i4_page <= 0) ||
 		(i4_num <= 0 || i4_num > 1000)
@@ -826,6 +756,12 @@ static int callback_tasklist(HttpContext *context)
 	} else if (i4_category == 1) {
 		//获取已下载完成的任务
 		task_cnt = task_info_complete_list_get(&list_head);
+	} else if (i4_category == 2) {
+		//获取暂停的任务
+		task_cnt = task_info_stop_list_get(&list_head);
+	} else if (i4_category == 3) {
+		//获取出错的任务
+		task_cnt = task_info_error_list_get(&list_head);
 	}
 
 	pcs_log("got task info list return %d\n", task_cnt);
@@ -1015,6 +951,331 @@ static int callback_taskdel(HttpContext *context)
 	return 0;
 }
 
+/**
+ * @brief 同步目录
+ *
+ * @return 
+ */
+static int callback_sync(HttpContext *context)
+{
+	char *lpath = NULL;
+	char  *rpath = NULL;
+
+	int ret = -1;
+
+	cJSON *root = NULL;
+	cJSON *item = NULL;
+
+    struct stat st;
+    int err = 0;
+	PcsFileInfo *meta = NULL;
+	char json[128];
+	int json_len = 0;	
+
+	xhttpd_http_t *xhttp = (xhttpd_http_t *)(context->http);
+	if (!xhttp || xhttp->method != XHTTPD_METHOD_POST || !(xhttp->content) || xhttp->content_len <= 0) {
+		pcs_log("must post and json context\n");
+		return ERRCODE_ARG;
+	}
+
+	root = cJSON_Parse(xhttp->content);
+	if (!root) {
+		pcs_log("parse json failed, %s\n", xhttp->content);
+		return ERRCODE_ARG;
+	}
+
+	item = cJSON_GetObjectItem(root, "lpath");
+	if (item && item->type == cJSON_String && item->valuestring && *(item->valuestring)) {
+		lpath = pcs_utils_strdup(item->valuestring);
+	}
+
+	item = cJSON_GetObjectItem(root, "rpath");
+	if (item && item->type == cJSON_String && item->valuestring && *(item->valuestring)) {
+		rpath = pcs_utils_strdup(item->valuestring);
+	}
+
+	cJSON_Delete(root);
+
+	if (!lpath || !rpath) {
+		if (lpath) pcs_free(lpath);
+		if (rpath) pcs_free(rpath);
+		return ERRCODE_ARG;
+	}
+
+    // 检查本地目录
+    if (stat(lpath, &st) == -1) {
+        err = errno;
+        if (err != ENOENT) {
+            pcs_log("stat lpath failed, %s, %s\n", lpath, strerror(err));
+            return -1;
+        } else {
+            //创建目录 
+            create_dir_r(lpath);
+        }
+    }
+
+    //检查远程目录
+	meta = pcs_meta(context->pcs, rpath);
+	if (!meta) {
+		ret = ERRCODE_REMOTE_FILE;
+		goto sync_out;
+	}
+
+	if (!(meta->isdir)) {
+		pcs_log("not support of file sync\n");
+		ret = ERRCODE_REMOTE_FILE;
+		goto sync_out;
+	}	
+
+	ret = task_sync(context, rpath, lpath);
+
+sync_out:
+	if (lpath) pcs_free(lpath);
+	if (rpath) pcs_free(rpath);	
+
+	json_len = snprintf(json, sizeof(json), "{\"errno\":%d}", ret);
+
+	pcs_log("sync response len = %d is \n%s\n", json_len, json);
+
+	http_response_by_xhttpd(context, json, json_len);
+
+	return 0;
+}
+
+/**
+ * @brief 停止任务
+ * 停止下载，但是不会删除任务，用户可以点击恢复任务，继续下载
+ *
+ * @return 
+ */
+static int callback_taskstop(HttpContext *context)
+{
+	char *lpath = NULL;
+
+	cJSON *root = NULL;
+	cJSON *array = NULL;
+	cJSON *list = NULL;
+	cJSON *item = NULL;
+	int array_size = 0;	
+
+	struct _taskstopresult {
+		char *lpath;
+		int rc;
+	};
+
+	struct _taskstopresult *results = NULL;
+	char *json = NULL;
+	int i = 0;
+
+
+	xhttpd_http_t *xhttp = (xhttpd_http_t *)(context->http);
+	if (!xhttp || xhttp->method != XHTTPD_METHOD_POST || !(xhttp->content) || xhttp->content_len <= 0) {
+		pcs_log("must post and json context\n");
+		return ERRCODE_ARG;
+	}
+
+	root = cJSON_Parse(xhttp->content);
+	if (!root) {
+		pcs_log("parse json failed, %s\n", xhttp->content);
+		return ERRCODE_ARG;
+	}
+
+	array = cJSON_GetObjectItem(root, "list");
+	if (!array && array->type != cJSON_Array) {
+		cJSON_Delete(root);
+		return ERRCODE_ARG;
+	}
+
+	array_size = cJSON_GetArraySize(array);
+
+	if (array_size <= 0) {
+		cJSON_Delete(root);
+		return ERRCODE_ARG;
+	}
+
+	results = pcs_malloc(sizeof(struct _taskstopresult) * array_size);
+	if (!results) {
+		cJSON_Delete(root);
+		return ERRCODE_MEMORY;		
+	}
+
+	memset(results, 0, sizeof(struct _taskstopresult) * array_size);
+
+	int json_size = array_size * 4096;
+	int json_len = 0;
+
+	json = pcs_malloc(json_size);
+	if (!json) {
+		pcs_free(results);
+		cJSON_Delete(root);
+		return ERRCODE_MEMORY;
+	}
+
+	memset(json, 0, json_size);	
+
+	for (list = array->child, i = 0; list; list = list->next, i++) {
+		lpath = NULL;
+
+		item = cJSON_GetObjectItem(list, "lpath");
+		if (item && item->type == cJSON_String && item->valuestring && *(item->valuestring)) {
+			lpath = pcs_utils_strdup(item->valuestring);
+		}
+
+		pcs_log("try to stop task %s\n", lpath);
+
+		results[i].lpath = lpath;
+		if (lpath) {
+			results[i].rc = task_stop(lpath);
+		} else {
+			results[i].rc = 0;
+		}
+	}
+
+	cJSON_Delete(root);
+
+	json_len = snprintf(json, json_size, "{\"errno\":0,\"list\":[");
+
+	for (i = 0; i < array_size; i++) {
+		json_len += snprintf(json + json_len, json_size - json_len, "{\"lpath\":\"%s\",\"result\":%d},",
+			results[i].lpath ? results[i].lpath : "", results[i].rc
+		);
+
+		if (results[i].lpath) pcs_free(results[i].lpath); results[i].lpath = NULL;
+	}
+
+	if (json[json_len - 1] == ',') {
+		json[json_len - 1] = '\0';
+		json_len--;
+	}
+
+	json_len += snprintf(json + json_len, json_size - json_len, "]}");
+
+	pcs_log("taskdel response len = %d is \n%s\n", json_len, json);
+
+	http_response_by_xhttpd(context, json, json_len);	
+
+	pcs_free(json);
+	pcs_free(results);
+
+	return 0;
+}
+
+/**
+ * @brief 恢复任务
+ *
+ * @return 
+ */
+static int callback_taskresume(HttpContext *context)
+{
+	char *lpath = NULL;
+
+	cJSON *root = NULL;
+	cJSON *array = NULL;
+	cJSON *list = NULL;
+	cJSON *item = NULL;
+	int array_size = 0;	
+
+	struct _taskresumeresult {
+		char *lpath;
+		int rc;
+	};
+
+	struct _taskresumeresult *results = NULL;
+	char *json = NULL;
+	int i = 0;
+
+
+	xhttpd_http_t *xhttp = (xhttpd_http_t *)(context->http);
+	if (!xhttp || xhttp->method != XHTTPD_METHOD_POST || !(xhttp->content) || xhttp->content_len <= 0) {
+		pcs_log("must post and json context\n");
+		return ERRCODE_ARG;
+	}
+
+	root = cJSON_Parse(xhttp->content);
+	if (!root) {
+		pcs_log("parse json failed, %s\n", xhttp->content);
+		return ERRCODE_ARG;
+	}
+
+	array = cJSON_GetObjectItem(root, "list");
+	if (!array && array->type != cJSON_Array) {
+		cJSON_Delete(root);
+		return ERRCODE_ARG;
+	}
+
+	array_size = cJSON_GetArraySize(array);
+
+	if (array_size <= 0) {
+		cJSON_Delete(root);
+		return ERRCODE_ARG;
+	}
+
+	results = pcs_malloc(sizeof(struct _taskresumeresult) * array_size);
+	if (!results) {
+		cJSON_Delete(root);
+		return ERRCODE_MEMORY;		
+	}
+
+	memset(results, 0, sizeof(struct _taskresumeresult) * array_size);
+
+	int json_size = array_size * 4096;
+	int json_len = 0;
+
+	json = pcs_malloc(json_size);
+	if (!json) {
+		pcs_free(results);
+		cJSON_Delete(root);
+		return ERRCODE_MEMORY;
+	}
+
+	memset(json, 0, json_size);	
+
+	for (list = array->child, i = 0; list; list = list->next, i++) {
+		lpath = NULL;
+
+		item = cJSON_GetObjectItem(list, "lpath");
+		if (item && item->type == cJSON_String && item->valuestring && *(item->valuestring)) {
+			lpath = pcs_utils_strdup(item->valuestring);
+		}
+
+		pcs_log("try to resume task %s\n", lpath);
+
+		results[i].lpath = lpath;
+		if (lpath) {
+			results[i].rc = task_resume(context, lpath);
+		} else {
+			results[i].rc = 0;
+		}
+	}
+
+	cJSON_Delete(root);
+
+	json_len = snprintf(json, json_size, "{\"errno\":0,\"list\":[");
+
+	for (i = 0; i < array_size; i++) {
+		json_len += snprintf(json + json_len, json_size - json_len, "{\"lpath\":\"%s\",\"result\":%d},",
+			results[i].lpath ? results[i].lpath : "", results[i].rc
+		);
+
+		if (results[i].lpath) pcs_free(results[i].lpath); results[i].lpath = NULL;
+	}
+
+	if (json[json_len - 1] == ',') {
+		json[json_len - 1] = '\0';
+		json_len--;
+	}
+
+	json_len += snprintf(json + json_len, json_size - json_len, "]}");
+
+	pcs_log("taskdel response len = %d is \n%s\n", json_len, json);
+
+	http_response_by_xhttpd(context, json, json_len);	
+
+	pcs_free(json);
+	pcs_free(results);
+
+	return 0;	
+}
 
 static void http_response_error(HttpContext *context, int error_code)
 {
@@ -1044,7 +1305,10 @@ static const DispatchTable dispatch_table[] = {
 	{ "quota",		callback_quota	 	},
 	{ "download",	callback_download	},
 	{ "tasklist",	callback_tasklist   },
-	{ "taskdel",	callback_taskdel    }
+	{ "taskdel",	callback_taskdel    },
+	{ "sync",       callback_sync       },
+	{ "taskstop",   callback_taskstop   },
+	{ "taskresume",	callback_taskresume	}
 };
 
 /**
@@ -1083,17 +1347,8 @@ static int http_dispatch(HttpContext *context)
 
 	method++;
 
-	if (!is_http_login(context)) {
-		pcs_log("not login the server\n");
-		is_login = 0;
-	}
-	else {
-		pcs_log("have logined\n");
-		is_login = 1;
-	}
-
 	/* need check it every time */
-	if ((is_login == 0) && strcmp(method, "login") != 0) {
+	if ((context->is_login == 0) && strcmp(method, "login") != 0) {
 		/* not logined and not a login request */
 		pcs_log("not logined and not a login request\n");
 		http_response_error(context, ERRCODE_NOT_LOGIN);
@@ -1216,6 +1471,15 @@ int http_loop(HttpContext *context)
 	}
 
 	g_xhttpd = xhttpd;
+
+	if (!is_http_login(context)) {
+		pcs_log("not login the server\n");
+		context->is_login = 0;
+	}
+	else {
+		pcs_log("have logined\n");
+		context->is_login = 1;
+	}	
 
 	pcs_log("xhttpd looping ...\n");
 	xhttpd_loop(xhttpd);

@@ -572,7 +572,12 @@ int task_db_update(struct task_list *task_list, struct task *task)
 }
 
 
-static int task_db_complete_task_get_from_mnt(task_mnt_t *mnt, task_info_list_t **head, task_info_list_t **tail, int *cnt)
+static int task_db_task_get_from_mnt_by_status(
+    task_mnt_t *mnt, 
+    task_info_list_t **head, 
+    task_info_list_t **tail, 
+    int *cnt,
+    enum task_status status)
 {
     sqlite3 *db = NULL;
     int ret;
@@ -591,7 +596,7 @@ static int task_db_complete_task_get_from_mnt(task_mnt_t *mnt, task_info_list_t 
         return -1;
     }
 
-    sqlite3_bind_int(stmt, 1, TASK_STATUS_COMPLETE);
+    sqlite3_bind_int(stmt, 1, status);
 
     while ((ret = sqlite3_step(stmt)) == SQLITE_ROW) {
         list = pcs_malloc(sizeof(task_info_list_t));
@@ -632,14 +637,16 @@ static int task_db_complete_task_get_from_mnt(task_mnt_t *mnt, task_info_list_t 
 
         list->complete_ts = sqlite3_column_int(stmt, 7);
 
-        list->status = TASK_STATUS_COMPLETE;
+        list->status = status;
 
         if (*head) {
             (*tail)->next = list;
             *tail = list;
         } else {
             *head = list;
-            *tail = list;
+            if (tail) {
+                *tail = list;
+            }
         }
 
         *cnt = *cnt + 1;
@@ -650,16 +657,23 @@ static int task_db_complete_task_get_from_mnt(task_mnt_t *mnt, task_info_list_t 
     return 0;
 }
 
-int task_db_complete_task_get(struct task_list *task_list, struct task_info_list **info_list)
+int task_db_info_list_get_by_status(
+    struct task_list *task_list, 
+    struct task_info_list **info_list_head, 
+    struct task_info_list **info_list_tail,
+    int status)
 {
-    if (!task_list || !info_list) {
+    if (!task_list || 
+        !info_list_head || 
+        !info_list_tail || 
+        (status <= TASK_STATUS_NONE || status >= TASK_STATUS_MAX) ) {
         return -1;
     }
 
     if (!task_list->dev || !task_list->dev->mnts) {
         //没有挂载任何磁盘设备
         pcs_log("no disk mnted\n");
-        *info_list = NULL;
+        *info_list_head = NULL;
         return 0;
     }
 
@@ -667,8 +681,6 @@ int task_db_complete_task_get(struct task_list *task_list, struct task_info_list
     int mnt_cnt = task_list->dev->mnt_cnt;
     int i;
 
-    struct task_info_list *head = NULL;
-    struct task_info_list *tail = NULL;
     int cnt = 0;
     
     for (i = 0; i < mnt_cnt; i++) {
@@ -677,13 +689,12 @@ int task_db_complete_task_get(struct task_list *task_list, struct task_info_list
             continue;
         }
 
-        task_db_complete_task_get_from_mnt(mnt + i, &head, &tail, &cnt);
+        task_db_task_get_from_mnt_by_status(mnt + i, info_list_head, info_list_tail, &cnt, status);
     }
-
-    *info_list = head;
 
     return cnt;
 }
+
 
 int task_db_check_exist(task_mnt_t *mnt, const char *lpath)
 {
@@ -721,6 +732,115 @@ int task_db_check_exist(task_mnt_t *mnt, const char *lpath)
     rc = 0;
     if ((ret = sqlite3_step(stmt)) == SQLITE_ROW) {
         rc = 1;
+    }
+
+    sqlite3_finalize(stmt);
+
+    return rc;
+}
+
+/**
+ *
+ */
+int task_db_get_by_lpath(struct task_list *task_list, const char *lpath, struct task **task)
+{
+    sqlite3 *db = NULL;
+    int ret;
+    sqlite3_stmt *stmt = NULL;
+    int rc = 0;
+    char *str = NULL;
+
+    struct task *task_new = NULL;
+
+    if (!task_list || !lpath || !task) {
+        return -1;
+    }
+
+    pcs_log("try to get task from db %s\n", lpath);
+
+    char *sql = "SELECT rpath, size, rmd5, rcid, start_ts, complete_ts, download_ts, download_size, status FROM task WHERE lpath == ?";
+
+    task_dev_t *dev = task_list->dev;
+    task_mnt_t *mnt = NULL;
+    int found = 0;
+    int i = 0;
+
+    pcs_log("try to set task mnt, %s\n", lpath);
+
+    for (i = 0; i < dev->mnt_cnt; i++) {
+        mnt = dev->mnts + i;
+        if (strncmp(lpath, mnt->mnt, mnt->mnt_len) == 0) {
+            found = 1;
+            break;
+        } 
+    }
+
+    if (found == 0) {
+        pcs_log("not found the mount point %s\n", lpath);
+        return -1;
+    }
+
+    if (mnt->db == NULL) {
+        //try to open db
+        if ((ret = task_db_open(mnt)) != 0) {
+            //open db faild
+            return -1;
+        }
+    }
+
+    db = mnt->db;
+
+    ret = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (ret != SQLITE_OK) {
+        pcs_log("sqlite3_prepare failed, ret = %d, %s\n", ret, sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_text(stmt, 1, lpath + mnt->mnt_len, -1, SQLITE_STATIC);
+
+    rc = 0;
+    if ((ret = sqlite3_step(stmt)) == SQLITE_ROW) {
+        rc = 1;
+
+        if ((task_new = pcs_malloc(sizeof(struct task))) == NULL) {
+            pcs_log("malloc failed\n");
+            sqlite3_finalize(stmt);
+            return -1;
+        }
+
+        memset(task_new, 0, sizeof(struct task));
+
+        *task = task_new;
+
+        /* rpath, size, rmd5, rcid, start_ts, complete_ts, download_ts, download_size, status */
+        str = (char *)sqlite3_column_text(stmt, 0);
+        if (str) {
+            task_new->rpath = pcs_utils_strdup(str);
+        }
+
+        task_new->total_size = sqlite3_column_int64(stmt, 1);
+
+        str = (char *)sqlite3_column_text(stmt, 2);
+        if (str) {
+            task_new->rmd5 = pcs_utils_strdup(str);
+        }
+
+        str = (char *)sqlite3_column_text(stmt, 3);
+        if (str) {
+            task_new->rcid = pcs_utils_strdup(str);
+        } 
+
+        task_new->start_ts = sqlite3_column_int(stmt, 4);
+
+        task_new->complete_ts = sqlite3_column_int(stmt, 5);
+
+        task_new->download_ts = sqlite3_column_int(stmt, 6);
+
+        task_new->download_size = sqlite3_column_int64(stmt, 7);
+
+        task_new->status = sqlite3_column_int(stmt, 8);
+
+        task_new->lpath = pcs_utils_strdup(lpath);
     }
 
     sqlite3_finalize(stmt);

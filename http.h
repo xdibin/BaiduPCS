@@ -81,6 +81,8 @@ typedef struct HttpContext {
 	int			file_slice_size_min;	/**< 每个HTTP文件下载任务的最小文件分片尺寸 */
 
 	signal_handle_t	sig_handle;
+
+	int			is_login;
 } HttpContext;
 
 extern volatile int g_pcs_running;
