@@ -192,7 +192,7 @@ PCS_API void pcs_filist_iterater_init(PcsFileInfoList *list, PcsFileInfoListIter
 
 PCS_API PcsBool pcs_filist_iterater_next(PcsFileInfoListIterater *iterater)
 {
-	if (!iterater->list->link)
+	if (!iterater->list || !iterater->list->link)
 		return PcsFalse;
 	if (iterater->invert) {
 		if (!iterater->cursor) {

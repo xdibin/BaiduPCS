@@ -387,8 +387,8 @@ static int callback_list(HttpContext *context)
 	if (!list) {
 		if (pcs_strerror(context->pcs)) {
 			fprintf(stderr, "Error: %s\n", pcs_strerror(context->pcs));
-			return ERRCODE_UNKNOWN;
 		}
+		return ERRCODE_UNKNOWN;
 	}
 
 	print_http_filelist(list, &fileCount, &dirCount, &totalSize, md5, thumb);
