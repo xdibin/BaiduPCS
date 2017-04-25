@@ -148,7 +148,7 @@ static int task_mnt_init(task_mnt_t **mnt)
         return 0;
     }
 
-#if 1
+#if 0
     // just for debug on pc
     for (i = 0; i < volume_cnt; i++) {
         pcs_free(volumes[i].mnt);

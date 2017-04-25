@@ -29,12 +29,12 @@ else
 CCFLAGS:=-g -D_FILE_OFFSET_BITS=64 -DDEBUG -D_DEBUG
 endif
 
-PCS_CCFLAGS = -Wall -fPIC $(CCFLAGS) $(CYGWIN_CCFLAGS) $(APPLE_CCFLAGS) -I./ -I./pcs
+PCS_CCFLAGS = -Wall -fPIC $(CCFLAGS) $(CYGWIN_CCFLAGS) $(APPLE_CCFLAGS) -I./ -I./pcs $(CFLAGS)
 
 all: bin/pcs
 
 bin/pcs : pre $(PCS_OBJS) $(HTTP_OBJS)
-	$(CC) -o $@ $(PCS_OBJS) $(HTTP_OBJS) $(CCFLAGS) $(CYGWIN_CCFLAGS) $(APPLE_CCFLAGS) -lm -lcurl -lssl -lcrypto -lpthread -lev -lsqlite3
+	$(CC) -o $@ $(PCS_OBJS) $(HTTP_OBJS) $(CCFLAGS) $(CYGWIN_CCFLAGS) $(APPLE_CCFLAGS) -lm -lcurl -lssl -lcrypto -lpthread -lev -lsqlite3 $(LDFLAGS)
 
 
 #HTTP_CFLAGS = -Wunused-variable -Werror
@@ -80,7 +80,7 @@ bin/utf8.o: pcs/utf8.c pcs/utf8.h
 	$(CC) -o $@ -c $(PCS_CCFLAGS) pcs/utf8.c
 
 bin/libpcs.so: pre $(PCS_OBJS)
-	$(CC) -shared -fPIC -o $@ $(PCS_OBJS) -lcurl -lssl -lcrypto
+	$(CC) -shared -fPIC -o $@ $(PCS_OBJS) -lcurl -lssl -lcrypto $(LDFLAGS)
 
 .PHONY : install
 install:
