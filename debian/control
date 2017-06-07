@@ -1,0 +1,45 @@
+Source: baidupcs
+Section: net
+Priority: optional
+Maintainer: Boyuan Yang <073plan@gmail.com>
+Build-Depends:
+ debhelper (>= 9),
+ dh-autoreconf,
+ libssl-dev,
+ libcurl4-openssl-dev,
+Standards-Version: 3.9.8
+Homepage: https://github.com/GangZhuo/BaiduPCS
+
+Package: baidupcs
+Architecture: any
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
+Description: Command-line Baidu cloud disk utility
+ A command line tool to manipulate Baidu Cloud Disk files (pan.baidu.com).
+
+Package: libbaidupcs-dev
+Architecture: any
+Multi-Arch: same
+Section: libdevel
+Depends:
+ libbaidupcs0 (= ${binary:Version}),
+ ${misc:Depends},
+Description: Baidu cloud disk manipulation library (development files)
+ Libbaidupcs is a library to manipulate files in Baidu cloud disk.
+ .
+ This package provides C header files for the library.
+
+Package: libbaidupcs0
+Architecture: any
+Multi-Arch: same
+Section: libs
+Pre-Depends:
+ ${misc:Pre-Depends},
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
+Description: Baidu cloud disk manipulation library (shared library)
+ Libbaidupcs is a library to manipulate files in Baidu cloud disk.
+ .
+ This package provides shared libraries.
