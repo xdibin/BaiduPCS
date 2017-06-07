@@ -12,17 +12,17 @@
 /**
  * @brief context文件的默认路径
  */
-#define CONTEXT_FILE_DEFAULT	"/home/michael/.pcs/pcs.context"
+#define CONTEXT_FILE_DEFAULT	"/tmp/.pcs/pcs.context"
 
 /**
  * @brief cookie文件的默认路径
  */
-#define COOKIE_FILE_DEFAULT		"/home/michael/.pcs/pcs.cookie"
+#define COOKIE_FILE_DEFAULT		"/tmp/.pcs/pcs.cookie"
 
 /**
  * @brief 验证码文件的默认路径
  */
-#define CAPTCH_FILE_DEFAULT		"/home/michael/.pcs/captch.png"
+#define CAPTCH_FILE_DEFAULT		"/tmp/.pcs/captch.png"
 
 
 /**

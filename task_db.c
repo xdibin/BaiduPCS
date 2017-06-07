@@ -44,7 +44,7 @@ struct volume_dev_node {
 
 //TODO: 修改为系统挂载硬盘节点
 const struct volume_dev_node g_dev_nodes[] = {
-    { "/dev/", 5 },
+    { "/dev/sd", 7 },
     { NULL, 0 } /* make sure this is the last */
 };
 
@@ -148,7 +148,7 @@ static int task_mnt_init(task_mnt_t **mnt)
         return 0;
     }
 
-#if 0
+#if 1
     // just for debug on pc
     for (i = 0; i < volume_cnt; i++) {
         pcs_free(volumes[i].mnt);

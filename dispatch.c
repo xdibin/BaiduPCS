@@ -1436,6 +1436,9 @@ static int http_response_by_xhttpd(HttpContext *http, const char *body, int body
 	ret = snprintf(head, sizeof(head),
 		"HTTP/1.1 200 OK\r\n"
 		"Content-Type: application/json;charset=utf-8\r\n"
+		"Access-Control-Allow-Origin:*\r\n"
+		"Access-Control-Allow-Methods:POST\r\n"
+		"Access-Control-Allow-Headers:x-requested-with,content-type\r\n"
 		"Content-Length: %d\r\n"
 		"Connection: close\r\n"
 		"\r\n",
